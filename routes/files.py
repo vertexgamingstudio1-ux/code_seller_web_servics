@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request`nfrom middleware.admin_auth import require_admin
 from pathlib import Path
 from werkzeug.utils import secure_filename
 import uuid
@@ -12,7 +12,7 @@ ALLOWED_SINGLE = {
 }
 MAX_SINGLE_SIZE = 25 * 1024 * 1024
 MAX_PACKAGE_SIZE = 250 * 1024 * 1024
-@files_bp.post("/upload")
+@files_bp.post("/upload")`n@require_admin
 def upload_file():
     upload_type = request.form.get("upload_type", "").strip().lower()
     product_id = request.form.get("product_id", "").strip()
@@ -85,3 +85,4 @@ def upload_file():
             "storage_path": str(target.relative_to(UPLOAD_ROOT))
         }
     }), 201
+
