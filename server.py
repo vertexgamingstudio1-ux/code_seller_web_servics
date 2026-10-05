@@ -14,7 +14,8 @@ def create_app():
         origins=allowed_origins,
         supports_credentials=True,
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Authorization"]
+        allow_headers=["Content-Type", "Authorization"],
+        expose_headers=["Content-Type"]
     )
     app.config["SERVICE_NAME"] = Config.SERVICE_NAME
     app.config["SERVICE_VERSION"] = Config.SERVICE_VERSION
