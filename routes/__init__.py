@@ -7,8 +7,13 @@ from routes.versions import versions_bp
 from routes.downloads import downloads_bp
 from routes.files import files_bp
 from routes.auth import auth_bp
+from routes.verification import verification_bp
 def register_routes(app):
     app.register_blueprint(auth_bp, url_prefix="/api/auth")
+    app.register_blueprint(
+        verification_bp,
+        url_prefix="/api/verification"
+    )
     app.register_blueprint(admin_bp, url_prefix="/api/admin")
     app.register_blueprint(customer_bp, url_prefix="/api/customer")
     app.register_blueprint(products_bp, url_prefix="/api/products")
