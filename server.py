@@ -1,12 +1,20 @@
-﻿from flask import Flask, jsonify
+import os
+from flask import Flask, jsonify
 from flask_cors import CORS
 from config import Config
 from routes import register_routes
 def create_app():
     app = Flask(__name__)
+    allowed_origins = [
+        "https://code-seller-static.onrender.com",
+        "https://code-seller-static2.onrender.com"
+    ]
     CORS(
         app,
-        origins=Config.CORS_ORIGINS
+        origins=allowed_origins,
+        supports_credentials=True,
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization"]
     )
     app.config["SERVICE_NAME"] = Config.SERVICE_NAME
     app.config["SERVICE_VERSION"] = Config.SERVICE_VERSION
