@@ -1,20 +1,32 @@
 ﻿from flask import Blueprint, jsonify, request
+from middleware.auth import require_admin
 from services.product_service import ProductService
-products_bp = Blueprint("products", __name__)
-@products_bp.get("/")
-def product_list():
-    return jsonify({"success": True, "result": ProductService.list_products()})
-@products_bp.get("/<product_id>")
+bp = Blueprint("products", __name__)
+@bp.get("/")
+def list_products():
+    try:
+        return jsonify(success=True, result=ProductService.list_products()), 200
+    except Exception:
+        return jsonify(success=False, error="Could not load products"), 503
+@bp.get("/<product_id>")
 def product_detail(product_id):
-    return jsonify({"success": True, "result": ProductService.get_product(product_id)})
-@products_bp.post("/")
-def product_create():
-    data = request.get_json(silent=True) or {}
-    return jsonify({"success": True, "result": ProductService.create_product(data)}), 201
-@products_bp.put("/<product_id>")
-def product_update(product_id):
-    data = request.get_json(silent=True) or {}
-    return jsonify({"success": True, "result": ProductService.update_product(product_id, data)})
-@products_bp.delete("/<product_id>")
-def product_delete(product_id):
-    return jsonify({"success": True, "result": ProductService.delete_product(product_id)})
+    try:
+        product = ProductService.get_product(product_id)
+        if product is None:
+            return jsonify(success=False, error="Product not found"), 404
+        return jsonify(success=True, result=product), 200
+    except Exception:
+        return jsonify(success=False, error="Could not load product"), 503
+@bp.post("/")
+@require_admin
+def create_product():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(success=False, error="A JSON object is required"), 400
+    try:
+        product = ProductService.create_product(data)
+        return jsonify(success=True, result=product), 201
+    except ValueError as exc:
+        return jsonify(success=False, error=str(exc)), 400
+    except Exception:
+        return jsonify(success=False, error="Could not create product"), 503

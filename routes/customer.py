@@ -1,17 +1,8 @@
-﻿from flask import Blueprint, jsonify, request
-from services.customer_service import CustomerService
-customer_bp = Blueprint("customer", __name__)
-@customer_bp.get("/status")
-def customer_status():
-    return jsonify({"success": True, "area": "customer", "status": "available"})
-@customer_bp.post("/register")
-def customer_register():
-    data = request.get_json(silent=True) or {}
-    return jsonify({"success": True, "result": CustomerService.register(data)}), 201
-@customer_bp.post("/login")
-def customer_login():
-    data = request.get_json(silent=True) or {}
-    return jsonify({"success": True, "result": CustomerService.login(data)})
-@customer_bp.get("/account")
-def customer_account():
-    return jsonify({"success": True, "result": CustomerService.account()})
+from flask import Blueprint,jsonify
+from middleware.auth import require_customer
+bp=Blueprint("customer",__name__)
+@bp.get("/me")
+@require_customer
+def me():
+    c=getattr(__import__("flask").request,"auth",{})
+    return jsonify(success=True,customer={"id":c.get("sub"),"email":c.get("email"),"role":c.get("role")})

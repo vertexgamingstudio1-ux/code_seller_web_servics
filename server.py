@@ -1,44 +1,20 @@
-import os
-from flask import Flask, jsonify
+﻿from flask import Flask
 from flask_cors import CORS
 from config import Config
-from routes import register_routes
-def create_app():
-    app = Flask(__name__)
-    allowed_origins = [
-        "https://code-seller-static.onrender.com",
-        "https://code-seller-static2.onrender.com"
-    ]
-    CORS(
-        app,
-        origins=allowed_origins,
-        supports_credentials=True,
-        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Authorization"],
-        expose_headers=["Content-Type"]
-    )
-    app.config["SERVICE_NAME"] = Config.SERVICE_NAME
-    app.config["SERVICE_VERSION"] = Config.SERVICE_VERSION
-    register_routes(app)
-    @app.get("/")
-    def home():
-        return jsonify({
-            "service": Config.SERVICE_NAME,
-            "version": Config.SERVICE_VERSION,
-            "status": "online"
-        })
-    @app.get("/api/health")
-    def health():
-        return jsonify({
-            "status": "ok",
-            "service": Config.SERVICE_NAME,
-            "version": Config.SERVICE_VERSION
-        })
-    return app
-app = create_app()
+from routes.system import bp as system_bp
+from routes.auth import bp as auth_bp
+from routes.customer import bp as customer_bp
+from routes.admin import bp as admin_bp
+from routes.products import bp as products_bp
+app = Flask(__name__)
+CORS(app, origins=[
+    "https://code-seller-static.onrender.com",
+    "https://code-seller-static2.onrender.com",
+])
+app.register_blueprint(system_bp, url_prefix="/api")
+app.register_blueprint(auth_bp, url_prefix="/api/auth")
+app.register_blueprint(customer_bp, url_prefix="/api/customer")
+app.register_blueprint(admin_bp, url_prefix="/api/admin")
+app.register_blueprint(products_bp, url_prefix="/api/products")
 if __name__ == "__main__":
-    app.run(
-        host=Config.HOST,
-        port=Config.PORT,
-        debug=Config.DEBUG
-    )
+    app.run(host=Config.HOST, port=Config.PORT)

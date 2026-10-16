@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: code-seller-web-service
+    name: code-seller-web-servics
     runtime: python
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn server:app

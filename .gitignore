@@ -1,31 +1,6 @@
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
-# Environment variables and secrets
+*.pyc
 .env
-.env.*
-!.env.example
-# Local configuration
-*.local
-# Logs
-*.log
-logs/
-# Uploaded/private files
+.venv/
 uploads/*
 !uploads/.gitkeep
-# Test/cache files
-.pytest_cache/
-.coverage
-htmlcov/
-# IDE
-.vscode/
-.idea/
-# OS
-.DS_Store
-Thumbs.db

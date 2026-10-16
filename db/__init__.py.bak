@@ -1,0 +1,3 @@
+from db.schema import init_schema
+init_schema()
+print("Database schema initialized.")
