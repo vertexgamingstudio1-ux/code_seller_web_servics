@@ -1,11 +1,39 @@
-﻿import os
+import os
 import uuid
 import bcrypt
+import re
+import zipfile
+from datetime import date, timedelta, datetime
+from zoneinfo import ZoneInfo
+from pathlib import Path
+from werkzeug.utils import secure_filename
 from flask import Blueprint, jsonify, request
 from db import get_connection
 from auth.jwt import create_admin_token
 from middleware.auth import require_admin
 bp = Blueprint("admin", __name__)
+FESTIVAL_CAMPAIGNS = (("holi", "Holi"), ("diwali", "Diwali"), ("navratri", "Navratri"), ("ganesh-chaturthi", "Ganesh Chaturthi"), ("new-year", "New Year"))
+
+def ensure_festival_tables(client):
+    client.execute("""CREATE TABLE IF NOT EXISTS festival_scheduler_settings (id INTEGER PRIMARY KEY CHECK (id=1), enabled INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+    client.execute("INSERT OR IGNORE INTO festival_scheduler_settings (id,enabled) VALUES (1,0)")
+    client.execute("""CREATE TABLE IF NOT EXISTS festival_campaigns (slug TEXT PRIMARY KEY, name TEXT NOT NULL, reference_sale_date TEXT, enabled INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+    for slug,name in FESTIVAL_CAMPAIGNS:
+        client.execute("INSERT OR IGNORE INTO festival_campaigns (slug,name) VALUES (?,?)",(slug,name))
+
+def festival_payload(client):
+    ensure_festival_tables(client)
+    enabled=client.execute("SELECT enabled FROM festival_scheduler_settings WHERE id=1").rows[0][0]
+    records=client.execute("SELECT slug,name,reference_sale_date,enabled FROM festival_campaigns ORDER BY rowid").rows
+    today=datetime.now(ZoneInfo("Asia/Kolkata")).date(); campaigns=[]
+    for slug,name,sale_date,campaign_enabled in records:
+        start=date.fromisoformat(sale_date)-timedelta(days=1) if sale_date else None
+        notification=None
+        if start and campaign_enabled and enabled:
+            if start==today: notification="Turn on your "+name+" Code Seller sale today."
+            elif today<start<=today+timedelta(days=7): notification="Your "+name+" Code Seller sale starts "+start.isoformat()+"."
+        campaigns.append({"slug":slug,"name":name,"reference_sale_date":sale_date,"campaign_start_date":start.isoformat() if start else None,"enabled":bool(campaign_enabled),"notification":notification})
+    return {"enabled":bool(enabled),"campaigns":campaigns,"today":today.isoformat()}
 def rows(sql, params=(), fields=()):
     with get_connection() as client:
         result = client.execute(sql, params)
@@ -53,6 +81,41 @@ def dashboard():
         return jsonify(success=True, result=result[0])
     except Exception:
         return fail("Could not load dashboard data. Verify the database schema.", 503)
+
+@bp.get("/festival-scheduler")
+@require_admin
+def get_festival_scheduler():
+    try:
+        with get_connection() as client: result=festival_payload(client)
+        return jsonify(success=True,result=result)
+    except Exception:
+        return fail("Could not load festival schedules",503)
+
+@bp.put("/festival-scheduler")
+@require_admin
+def save_festival_scheduler():
+    data=request.get_json(silent=True)
+    if not isinstance(data,dict) or not isinstance(data.get("campaigns"),list): return fail("Scheduler settings and campaign list are required",400)
+    submitted={item.get("slug"):item for item in data["campaigns"] if isinstance(item,dict)}
+    if set(submitted)!={slug for slug,_ in FESTIVAL_CAMPAIGNS}: return fail("All five festival campaigns must be included",400)
+    normalized=[]
+    try:
+        for slug,_ in FESTIVAL_CAMPAIGNS:
+            item=submitted[slug]; raw_date=item.get("reference_sale_date") or None
+            parsed=date.fromisoformat(raw_date) if raw_date else None
+            if raw_date and parsed.isoformat()!=raw_date: raise ValueError
+            normalized.append((slug,raw_date,int(bool(item.get("enabled",False)))))
+    except (TypeError,ValueError): return fail("Enter valid sale dates in YYYY-MM-DD format",400)
+    try:
+        with get_connection() as client:
+            ensure_festival_tables(client)
+            client.execute("UPDATE festival_scheduler_settings SET enabled=?,updated_at=CURRENT_TIMESTAMP WHERE id=1",(int(bool(data.get("enabled",False))),))
+            for slug,sale_date,campaign_enabled in normalized:
+                client.execute("UPDATE festival_campaigns SET reference_sale_date=?,enabled=?,updated_at=CURRENT_TIMESTAMP WHERE slug=?",(sale_date,campaign_enabled,slug))
+            result=festival_payload(client)
+        return jsonify(success=True,result=result)
+    except Exception: return fail("Could not save festival schedules to the database",503)
+
 @bp.get("/products")
 @require_admin
 def products():
@@ -100,6 +163,100 @@ def create_product():
         return jsonify(success=True, id=product_id), 201
     except Exception:
         return fail("Could not create product. The slug may already exist.", 409)
+
+@bp.post("/products/with-code")
+@require_admin
+def create_product_with_code():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return fail("A JSON object is required", 400)
+    name = str(data.get("name", "")).strip()
+    slug = str(data.get("slug", "")).strip().lower()
+    description = str(data.get("description", "")).strip()
+    category = str(data.get("category", "")).strip() or None
+    version = str(data.get("version", "1.0.0")).strip()
+    kind = str(data.get("product_type", "")).strip().lower()
+    files = data.get("files")
+    if not name or not slug or len(name) > 160 or len(slug) > 180:
+        return fail("Product name and a valid slug are required", 400)
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+        return fail("Slug must contain lowercase letters, numbers and hyphens", 400)
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        return fail("Version must use the format 1.0.0", 400)
+    if kind not in {"single", "package"} or not isinstance(files, list) or not files:
+        return fail("A single file or whole package with source files is required", 400)
+    if kind == "single" and len(files) != 1:
+        return fail("Single File products must contain exactly one file", 400)
+    if len(files) > 100:
+        return fail("A package can contain up to 100 files", 400)
+    total_bytes = 0
+    cleaned = []
+    allowed = {"py", "js", "ts", "html", "css", "json", "txt", "md", "java", "c", "cpp", "h", "hpp", "cs", "go", "rs", "php", "sql", "sh", "yaml", "yml", "xml", "toml", "jsx", "tsx", "vue", "svelte", "svg", "gitignore"}
+    for entry in files:
+        if not isinstance(entry, dict):
+            return fail("Each source file must include a name and content", 400)
+        raw_name = str(entry.get("name", "")).replace("\\", "/").strip()
+        parts = raw_name.split("/")
+        if not raw_name or raw_name.startswith("/") or any(p in {"", ".", ".."} for p in parts):
+            return fail("Source file paths must be relative and cannot contain '..'", 400)
+        filename = secure_filename(parts[-1])
+        if not filename or ("." in filename and filename.rsplit(".", 1)[-1].lower() not in allowed):
+            return fail("A source file uses an unsupported file type", 400)
+        safe_name = "/".join(parts[:-1] + [filename])
+        content = entry.get("content", "")
+        if not isinstance(content, str):
+            return fail("Source file content must be text", 400)
+        encoded = content.encode("utf-8")
+        total_bytes += len(encoded)
+        if total_bytes > 5 * 1024 * 1024:
+            return fail("Source files must total 5 MB or less", 413)
+        cleaned.append((safe_name, encoded))
+    try:
+        price = int(data.get("price", 0))
+    except (TypeError, ValueError):
+        return fail("Price must be a whole number in INR", 400)
+    if price < 0:
+        return fail("Price cannot be negative", 400)
+    is_free = bool(data.get("is_free", False))
+    if is_free:
+        price = 0
+    is_published = bool(data.get("is_published", False))
+    product_id = str(uuid.uuid4())
+    version_id = str(uuid.uuid4())
+    upload_root = Path(__file__).resolve().parent.parent / "uploads"
+    target_dir = upload_root / product_id / version
+    target_dir.mkdir(parents=True, exist_ok=True)
+    single_path = package_path = None
+    try:
+        if kind == "single":
+            filename = secure_filename(cleaned[0][0].rsplit("/", 1)[-1])
+            target = target_dir / filename
+            target.write_bytes(cleaned[0][1])
+            single_path = str(target.relative_to(upload_root))
+        else:
+            target = target_dir / (secure_filename(slug) + ".zip")
+            with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for file_name, content in cleaned:
+                    archive.writestr(file_name, content)
+            package_path = str(target.relative_to(upload_root))
+        with get_connection() as client:
+            client.execute("""INSERT INTO products
+                (id,name,slug,description,category,price,currency,is_free,is_published)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (product_id,name,slug,description,category,price,"INR",int(is_free),int(is_published)))
+            client.execute("""INSERT INTO product_versions
+                (id,product_id,version,changelog,single_file_path,package_file_path,is_active)
+                VALUES (?,?,?,?,?,?,1)""",
+                (version_id,product_id,version,"Initial release",single_path,package_path))
+        return jsonify(success=True, result={"id":product_id,"version_id":version_id,
+            "slug":slug,"version":version,"product_type":kind,"source_file_count":len(cleaned)}), 201
+    except Exception:
+        try:
+            target.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return fail("Could not save the product. The slug may already exist.", 409)
+
 @bp.patch("/products/<product_id>")
 @require_admin
 def update_product(product_id):
