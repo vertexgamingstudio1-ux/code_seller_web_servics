@@ -23,8 +23,11 @@ class ProductService:
                    WHERE is_published = 1
                    ORDER BY created_at DESC"""
             )
-        products = [_product(row) for row in result.rows]
-        return {"products": products, "count": len(products)}
+        from services.festival_service import active_campaign, apply_campaign
+        with get_connection() as client:
+            campaign = active_campaign(client)
+        products = [apply_campaign(_product(row), campaign) for row in result.rows]
+        return {"products": products, "count": len(products), "festival_campaign": campaign}
     @staticmethod
     def get_product(product_id):
         with get_connection() as client:
@@ -37,7 +40,12 @@ class ProductService:
                    LIMIT 1""",
                 (product_id,)
             )
-        return _product(result.rows[0]) if result.rows else None
+        if not result.rows:
+            return None
+        from services.festival_service import active_campaign, apply_campaign
+        with get_connection() as client:
+            campaign = active_campaign(client)
+        return apply_campaign(_product(result.rows[0]), campaign)
     @staticmethod
     def create_product(data):
         import uuid

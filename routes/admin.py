@@ -3,8 +3,7 @@ import uuid
 import bcrypt
 import re
 import zipfile
-from datetime import date, timedelta, datetime
-from zoneinfo import ZoneInfo
+from datetime import date, timedelta
 from pathlib import Path
 from werkzeug.utils import secure_filename
 from flask import Blueprint, jsonify, request
@@ -12,28 +11,6 @@ from db import get_connection
 from auth.jwt import create_admin_token
 from middleware.auth import require_admin
 bp = Blueprint("admin", __name__)
-FESTIVAL_CAMPAIGNS = (("holi", "Holi"), ("diwali", "Diwali"), ("navratri", "Navratri"), ("ganesh-chaturthi", "Ganesh Chaturthi"), ("new-year", "New Year"))
-
-def ensure_festival_tables(client):
-    client.execute("""CREATE TABLE IF NOT EXISTS festival_scheduler_settings (id INTEGER PRIMARY KEY CHECK (id=1), enabled INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
-    client.execute("INSERT OR IGNORE INTO festival_scheduler_settings (id,enabled) VALUES (1,0)")
-    client.execute("""CREATE TABLE IF NOT EXISTS festival_campaigns (slug TEXT PRIMARY KEY, name TEXT NOT NULL, reference_sale_date TEXT, enabled INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
-    for slug,name in FESTIVAL_CAMPAIGNS:
-        client.execute("INSERT OR IGNORE INTO festival_campaigns (slug,name) VALUES (?,?)",(slug,name))
-
-def festival_payload(client):
-    ensure_festival_tables(client)
-    enabled=client.execute("SELECT enabled FROM festival_scheduler_settings WHERE id=1").rows[0][0]
-    records=client.execute("SELECT slug,name,reference_sale_date,enabled FROM festival_campaigns ORDER BY rowid").rows
-    today=datetime.now(ZoneInfo("Asia/Kolkata")).date(); campaigns=[]
-    for slug,name,sale_date,campaign_enabled in records:
-        start=date.fromisoformat(sale_date)-timedelta(days=1) if sale_date else None
-        notification=None
-        if start and campaign_enabled and enabled:
-            if start==today: notification="Turn on your "+name+" Code Seller sale today."
-            elif today<start<=today+timedelta(days=7): notification="Your "+name+" Code Seller sale starts "+start.isoformat()+"."
-        campaigns.append({"slug":slug,"name":name,"reference_sale_date":sale_date,"campaign_start_date":start.isoformat() if start else None,"enabled":bool(campaign_enabled),"notification":notification})
-    return {"enabled":bool(enabled),"campaigns":campaigns,"today":today.isoformat()}
 def rows(sql, params=(), fields=()):
     with get_connection() as client:
         result = client.execute(sql, params)
@@ -86,7 +63,8 @@ def dashboard():
 @require_admin
 def get_festival_scheduler():
     try:
-        with get_connection() as client: result=festival_payload(client)
+        from services.festival_service import scheduler_payload
+        with get_connection() as client: result=scheduler_payload(client)
         return jsonify(success=True,result=result)
     except Exception:
         return fail("Could not load festival schedules",503)
@@ -94,27 +72,69 @@ def get_festival_scheduler():
 @bp.put("/festival-scheduler")
 @require_admin
 def save_festival_scheduler():
+    from services.festival_service import CAMPAIGNS, scheduler_payload, ensure_festival_tables
     data=request.get_json(silent=True)
     if not isinstance(data,dict) or not isinstance(data.get("campaigns"),list): return fail("Scheduler settings and campaign list are required",400)
     submitted={item.get("slug"):item for item in data["campaigns"] if isinstance(item,dict)}
-    if set(submitted)!={slug for slug,_ in FESTIVAL_CAMPAIGNS}: return fail("All five festival campaigns must be included",400)
+    if set(submitted)!={slug for slug,_ in CAMPAIGNS}: return fail("All five festival campaigns must be included",400)
     normalized=[]
     try:
-        for slug,_ in FESTIVAL_CAMPAIGNS:
-            item=submitted[slug]; raw_date=item.get("reference_sale_date") or None
-            parsed=date.fromisoformat(raw_date) if raw_date else None
-            if raw_date and parsed.isoformat()!=raw_date: raise ValueError
-            normalized.append((slug,raw_date,int(bool(item.get("enabled",False)))))
-    except (TypeError,ValueError): return fail("Enter valid sale dates in YYYY-MM-DD format",400)
+        for slug,_ in CAMPAIGNS:
+            item=submitted[slug]
+            raw_start=item.get("reference_sale_start",item.get("reference_sale_date")) or None
+            raw_end=item.get("campaign_end_date") or None
+            sale_start=date.fromisoformat(raw_start) if raw_start else None
+            end=date.fromisoformat(raw_end) if raw_end else None
+            if raw_start and sale_start.isoformat()!=raw_start: raise ValueError
+            if raw_end and end.isoformat()!=raw_end: raise ValueError
+            if sale_start and end and end < sale_start-timedelta(days=1): raise ValueError
+            normalized.append((raw_start,raw_end,int(bool(item.get("enabled",False))),slug))
+    except (TypeError,ValueError): return fail("Enter valid dates and ensure the campaign end date follows its start",400)
     try:
         with get_connection() as client:
             ensure_festival_tables(client)
             client.execute("UPDATE festival_scheduler_settings SET enabled=?,updated_at=CURRENT_TIMESTAMP WHERE id=1",(int(bool(data.get("enabled",False))),))
-            for slug,sale_date,campaign_enabled in normalized:
-                client.execute("UPDATE festival_campaigns SET reference_sale_date=?,enabled=?,updated_at=CURRENT_TIMESTAMP WHERE slug=?",(sale_date,campaign_enabled,slug))
-            result=festival_payload(client)
+            for raw_start,raw_end,campaign_enabled,slug in normalized:
+                client.execute("UPDATE festival_campaigns SET reference_sale_date=?,campaign_end_date=?,enabled=?,updated_at=CURRENT_TIMESTAMP WHERE slug=?",(raw_start,raw_end,campaign_enabled,slug))
+            result=scheduler_payload(client)
         return jsonify(success=True,result=result)
     except Exception: return fail("Could not save festival schedules to the database",503)
+
+@bp.get("/demands")
+@require_admin
+def list_demands():
+    try:
+        from routes.customer import ensure_demand_tables
+        with get_connection() as client: ensure_demand_tables(client)
+        result=rows("""SELECT t.id,t.subject,t.status,t.created_at,t.updated_at,u.email AS customer_email,
+          (SELECT message FROM demand_messages m WHERE m.thread_id=t.id ORDER BY m.created_at DESC LIMIT 1) AS last_message,
+          (SELECT COUNT(*) FROM demand_messages m WHERE m.thread_id=t.id) AS message_count
+          FROM demand_threads t JOIN users u ON u.id=t.user_id ORDER BY t.updated_at DESC""",
+          fields=("id","subject","status","created_at","updated_at","customer_email","last_message","message_count"))
+        return jsonify(success=True,result=result)
+    except Exception: return fail("Could not load Demand conversations",503)
+
+@bp.get("/demands/<thread_id>/messages")
+@require_admin
+def get_demand_messages(thread_id):
+    try:
+        messages=rows("SELECT id,thread_id,sender_role,message,created_at FROM demand_messages WHERE thread_id=? ORDER BY created_at,rowid",(thread_id,),("id","thread_id","sender_role","message","created_at"))
+        return jsonify(success=True,result=messages)
+    except Exception: return fail("Could not load Demand messages",503)
+
+@bp.post("/demands/<thread_id>/messages")
+@require_admin
+def reply_to_demand(thread_id):
+    data=request.get_json(silent=True) or {}; message=str(data.get("message","")).strip()
+    if not message or len(message)>4000: return fail("Message must contain 1 to 4000 characters",400)
+    try:
+        with get_connection() as client:
+            found=client.execute("SELECT id FROM demand_threads WHERE id=?",(thread_id,)).rows
+            if not found: return fail("Demand conversation not found",404)
+            client.execute("INSERT INTO demand_messages (id,thread_id,user_id,sender_role,message) VALUES (?,?,?,?,?)",(str(uuid.uuid4()),thread_id,request.auth.get("sub"),"admin",message))
+            client.execute("UPDATE demand_threads SET updated_at=CURRENT_TIMESTAMP WHERE id=?",(thread_id,))
+        return jsonify(success=True),201
+    except Exception: return fail("Could not send reply",503)
 
 @bp.get("/products")
 @require_admin
