@@ -298,6 +298,41 @@ def update_product(product_id):
         return jsonify(success=True, updated=True)
     except Exception:
         return fail("Could not update product", 503)
+@bp.delete("/products/<product_id>")
+@require_admin
+def delete_product(product_id):
+    """Delete a product only when it has no customer/order/download history."""
+    try:
+        with get_connection() as client:
+            product = client.execute(
+                "SELECT id FROM products WHERE id = ? LIMIT 1", (product_id,)
+            ).rows
+            if not product:
+                return fail("Product not found", 404)
+
+            # Retain all order and download history, including version references.
+            history = client.execute(
+                """SELECT 1 FROM order_items
+                   WHERE product_id = ? OR product_version_id IN
+                     (SELECT id FROM product_versions WHERE product_id = ?)
+                   UNION ALL
+                   SELECT 1 FROM downloads
+                   WHERE product_id = ? OR product_version_id IN
+                     (SELECT id FROM product_versions WHERE product_id = ?)
+                   LIMIT 1""",
+                (product_id, product_id, product_id, product_id),
+            ).rows
+            if history:
+                return fail(
+                    "This product has order or download history and cannot be deleted", 409
+                )
+
+            # The schema has no cascade: remove only unreferenced versions and product.
+            client.execute("DELETE FROM product_versions WHERE product_id = ?", (product_id,))
+            client.execute("DELETE FROM products WHERE id = ?", (product_id,))
+        return jsonify(success=True, deleted=True, id=product_id)
+    except Exception:
+        return fail("Could not delete product", 503)
 @bp.get("/orders")
 @require_admin
 def orders():
