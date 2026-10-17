@@ -1,0 +1,18 @@
+[
+  {
+    "id": "code-005",
+    "name": "Python Automation Pack",
+    "price": "INR",
+    "currency": "799",
+    "is_free": 0,
+    "is_published": 1
+  },
+  {
+    "id": "code-006",
+    "name": "JavaScript Dashboard",
+    "price": "INR",
+    "currency": "1099",
+    "is_free": 0,
+    "is_published": 1
+  }
+]
