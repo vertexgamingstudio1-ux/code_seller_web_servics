@@ -351,7 +351,7 @@ def orders():
             ORDER BY o.created_at DESC LIMIT 500""",
             fields=("id","user_id","email","status","subtotal","total","currency","created_at","updated_at"))
         for order in data:
-            order["payments"]=rows("SELECT id,provider,provider_order_id,provider_payment_id,status,amount,currency,paid_at,created_at FROM payments WHERE order_id=? ORDER BY created_at",(order["id"],),("id","provider","provider_order_id","provider_payment_id","status","amount","currency","paid_at","created_at"))
+            order["payments"]=rows("SELECT id,provider,provider_payment_id,status,amount,currency,paid_at,created_at FROM payments WHERE order_id=? ORDER BY created_at",(order["id"],),("id","provider","provider_payment_id","status","amount","currency","paid_at","created_at"))
             approvals=rows("SELECT order_id,customer_id,amount,currency,approved_by,approved_at FROM cash_approvals WHERE order_id=?",(order["id"],),("order_id","customer_id","amount","currency","approved_by","approved_at"))
             order["cash_approval"]=approvals[0] if approvals else None
             order["can_confirm_cash"]=order["status"]=="pending_cash" and not approvals
