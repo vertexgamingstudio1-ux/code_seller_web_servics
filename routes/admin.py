@@ -356,7 +356,9 @@ def orders():
             order["cash_approval"]=approvals[0] if approvals else None
             order["can_confirm_cash"]=order["status"]=="pending_cash" and not approvals
         return jsonify(success=True, result=data)
-    except Exception:
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
         return fail("Could not load orders", 503)
 
 @bp.post("/orders/<order_id>/confirm-cash")
