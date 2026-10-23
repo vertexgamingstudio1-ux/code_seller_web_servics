@@ -1,0 +1,66 @@
+{
+  "created_at": "2026-10-17T10:49:28.407961",
+  "products": [
+    {
+      "id": "code-001",
+      "name": "AI Starter Project",
+      "slug": "ai-starter-project",
+      "description": "Complete starter project for building an AI application.",
+      "category": "AI",
+      "price": "INR",
+      "currency": "999",
+      "margin_percent": 0.0,
+      "is_free": 0,
+      "is_published": 1,
+      "sales_count": 0,
+      "created_at": "2026-10-10 15:45:56",
+      "updated_at": "2026-10-10 15:45:56"
+    },
+    {
+      "id": "code-002",
+      "name": "Modern Web Starter",
+      "slug": "modern-web-starter",
+      "description": "A clean foundation for a modern web project.",
+      "category": "Web",
+      "price": "INR",
+      "currency": "699",
+      "margin_percent": 0.0,
+      "is_free": 0,
+      "is_published": 1,
+      "sales_count": 0,
+      "created_at": "2026-10-10 15:45:56",
+      "updated_at": "2026-10-10 15:45:56"
+    },
+    {
+      "id": "code-003",
+      "name": "Game Development Kit",
+      "slug": "game-development-kit",
+      "description": "Starter source code for your next game project.",
+      "category": "Games",
+      "price": "INR",
+      "currency": "1299",
+      "margin_percent": 0.0,
+      "is_free": 0,
+      "is_published": 1,
+      "sales_count": 0,
+      "created_at": "2026-10-10 15:45:56",
+      "updated_at": "2026-10-10 15:45:56"
+    },
+    {
+      "id": "code-004",
+      "name": "Developer Utility",
+      "slug": "developer-utility",
+      "description": "A useful free tool for developers.",
+      "category": "Tools",
+      "price": "INR",
+      "currency": "0",
+      "margin_percent": 0.0,
+      "is_free": 1,
+      "is_published": 1,
+      "sales_count": 0,
+      "created_at": "2026-10-10 15:45:56",
+      "updated_at": "2026-10-10 15:45:56"
+    }
+  ],
+  "product_versions": []
+}

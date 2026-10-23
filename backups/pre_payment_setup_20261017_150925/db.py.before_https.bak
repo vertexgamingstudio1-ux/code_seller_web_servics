@@ -1,0 +1,13 @@
+import libsql_client
+from config import Config
+def get_connection():
+    if not Config.DATABASE_URL:
+        raise RuntimeError("TURSO_DATABASE_URL is not configured")
+    return libsql_client.create_client_sync(
+        Config.DATABASE_URL,
+        auth_token=Config.TURSO_AUTH_TOKEN or None
+    )
+def database_ready():
+    with get_connection() as client:
+        result=client.execute("SELECT 1")
+        return bool(result.rows and result.rows[0][0]==1)
