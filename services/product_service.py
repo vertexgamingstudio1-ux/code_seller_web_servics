@@ -1,4 +1,5 @@
-﻿from db import get_connection
+import secrets
+from db import get_connection
 PRODUCT_FIELDS = (
     "id", "name", "slug", "description", "category", "price",
     "currency", "is_free", "is_published", "sales_count",
@@ -48,7 +49,7 @@ class ProductService:
         return apply_campaign(_product(result.rows[0]), campaign)
     @staticmethod
     def create_product(data):
-        import uuid
+        import secrets
         import re
         name = str(data.get("name", "")).strip()
         slug = str(data.get("slug", "")).strip().lower()
@@ -73,8 +74,8 @@ class ProductService:
             raise ValueError("Price cannot be negative")
         if is_free:
             price = 0
-        product_id = str(uuid.uuid4())
         with get_connection() as client:
+            product_id = _new_product_id(client)
             client.execute(
                 """INSERT INTO products
                    (id, name, slug, description, category, price, currency,
@@ -95,3 +96,11 @@ class ProductService:
                 (product_id,)
             )
         return _product(result.rows[0]) if result.rows else None
+
+def _new_product_id(client):
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    for _ in range(30):
+        candidate = "".join(secrets.choice(alphabet) for _ in range(6))
+        if not client.execute("SELECT 1 FROM products WHERE id=?", (candidate,)).rows:
+            return candidate
+    raise RuntimeError("Could not allocate a unique product ID")

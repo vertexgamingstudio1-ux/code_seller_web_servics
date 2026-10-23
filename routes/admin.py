@@ -173,9 +173,10 @@ def create_product():
     free = bool(data.get("is_free",False))
     if free:
         price = 0
-    product_id = str(uuid.uuid4())
     try:
         with get_connection() as client:
+            from services.product_service import _new_product_id
+            product_id = _new_product_id(client)
             client.execute("""INSERT INTO products
                 (id,name,slug,description,category,price,currency,is_free,is_published)
                 VALUES (?,?,?,?,?,?,?,?,?)""",
@@ -241,8 +242,13 @@ def create_product_with_code():
     if is_free:
         price = 0
     is_published = bool(data.get("is_published", False))
-    product_id = str(uuid.uuid4())
+    from services.product_service import _new_product_id
     version_id = str(uuid.uuid4())
+    try:
+        with get_connection() as client:
+            product_id = _new_product_id(client)
+    except Exception:
+        return fail("Could not allocate a product ID", 503)
     upload_root = Path(__file__).resolve().parent.parent / "uploads"
     target_dir = upload_root / product_id / version
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -337,14 +343,48 @@ def delete_product(product_id):
 @require_admin
 def orders():
     try:
+        from services.order_service import ensure_cash_approval_schema
+        with get_connection() as client: ensure_cash_approval_schema(client)
         data = rows("""SELECT o.id,o.user_id,u.email,o.status,o.subtotal,o.total,
             o.currency,o.created_at,o.updated_at
             FROM orders o LEFT JOIN users u ON u.id=o.user_id
             ORDER BY o.created_at DESC LIMIT 500""",
             fields=("id","user_id","email","status","subtotal","total","currency","created_at","updated_at"))
+        for order in data:
+            order["payments"]=rows("SELECT id,provider,provider_order_id,provider_payment_id,status,amount,currency,paid_at,created_at FROM payments WHERE order_id=? ORDER BY created_at",(order["id"],),("id","provider","provider_order_id","provider_payment_id","status","amount","currency","paid_at","created_at"))
+            approvals=rows("SELECT order_id,customer_id,amount,currency,approved_by,approved_at FROM cash_approvals WHERE order_id=?",(order["id"],),("order_id","customer_id","amount","currency","approved_by","approved_at"))
+            order["cash_approval"]=approvals[0] if approvals else None
+            order["can_confirm_cash"]=order["status"]=="pending_cash" and not approvals
         return jsonify(success=True, result=data)
     except Exception:
         return fail("Could not load orders", 503)
+
+@bp.post("/orders/<order_id>/confirm-cash")
+@require_admin
+def confirm_cash_received(order_id):
+    try:
+        from services.order_service import ensure_cash_approval_schema
+        with get_connection() as client:
+            ensure_cash_approval_schema(client)
+            order=client.execute("SELECT user_id,total,currency,status FROM orders WHERE id=?",(order_id,)).rows
+            if not order:return fail("Order not found",404)
+            customer_id,amount,currency,status=order[0]
+            if status!="pending_cash":return fail("Only pending cash orders can be approved",409)
+            existing=client.execute("SELECT 1 FROM cash_approvals WHERE order_id=?",(order_id,)).rows
+            if existing:return fail("Cash receipt was already approved",409)
+            client.execute("INSERT INTO cash_approvals(order_id,customer_id,amount,currency,approved_by) VALUES(?,?,?,?,?)",
+                           (order_id,customer_id,amount,currency,request.auth["sub"]))
+            client.execute("UPDATE orders SET status='paid',updated_at=CURRENT_TIMESTAMP WHERE id=? AND status='pending_cash'",(order_id,))
+            approval=client.execute("SELECT approved_at FROM cash_approvals WHERE order_id=?",(order_id,)).rows[0][0]
+        return jsonify(success=True,result={"order_id":order_id,"customer_id":customer_id,"amount":amount,
+            "currency":currency,"status":"paid","approved_by":request.auth["sub"],"approved_at":approval})
+    except Exception:
+        try:
+            if rows("SELECT 1 FROM cash_approvals WHERE order_id=?",(order_id,)):
+                return fail("Cash receipt was already approved",409)
+        except Exception:
+            pass
+        return fail("Could not confirm cash receipt",503)
 @bp.patch("/orders/<order_id>")
 @require_admin
 def update_order(order_id):
@@ -354,6 +394,12 @@ def update_order(order_id):
         return fail("Unsupported order status", 400)
     try:
         with get_connection() as client:
+            current=client.execute("SELECT status FROM orders WHERE id=?",(order_id,)).rows
+            if not current:return fail("Order not found",404)
+            if status_value=="paid" and current[0][0]!="paid":
+                return fail("An order can be marked paid only after verified Razorpay confirmation",409)
+            if status_value in {"processing","completed"} and current[0][0] not in {"paid","processing","completed"}:
+                return fail("Only confirmed paid orders can be fulfilled",409)
             client.execute("UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",
                            (status_value,order_id))
         return jsonify(success=True, updated=True)
@@ -389,6 +435,20 @@ def refunds():
         return jsonify(success=True, result=data)
     except Exception:
         return fail("Could not load refunds", 503)
+
+@bp.get("/payments")
+@require_admin
+def payments():
+    try:
+        from services.order_service import ensure_payment_schema
+        with get_connection() as client: ensure_payment_schema(client)
+        data=rows("""SELECT p.id,p.order_id,o.user_id,u.email,p.provider,p.provider_order_id,
+            p.provider_payment_id,p.status,p.amount,p.currency,p.paid_at,p.created_at
+            FROM payments p JOIN orders o ON o.id=p.order_id LEFT JOIN users u ON u.id=o.user_id
+            ORDER BY p.created_at DESC LIMIT 500""",
+            fields=("id","order_id","customer_id","email","provider","provider_order_id","provider_payment_id","status","amount","currency","paid_at","created_at"))
+        return jsonify(success=True,result=data)
+    except Exception:return fail("Could not load payments",503)
 @bp.get("/versions")
 @require_admin
 def versions():

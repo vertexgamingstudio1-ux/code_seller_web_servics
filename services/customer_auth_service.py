@@ -12,7 +12,6 @@ def password_matches(password, password_hash):
     except (ValueError, TypeError):
         return False
 def create_customer(email, phone, display_name, password):
-    uid = str(uuid.uuid4())
     ph = hash_password(password)
     with get_connection() as c:
         existing = c.execute(
@@ -20,6 +19,7 @@ def create_customer(email, phone, display_name, password):
         ).rows
         if existing:
             raise ValueError("An account with this email already exists")
+        uid = _new_customer_id(c)
         c.execute(
             """INSERT INTO users(id,email,phone,password_hash,display_name,role,is_active)
                VALUES(?,?,?,?,?,'customer',1)""",
@@ -29,6 +29,15 @@ def create_customer(email, phone, display_name, password):
         "id": uid, "email": email, "phone": phone or None,
         "display_name": display_name, "role": "customer"
     }
+
+def _new_customer_id(client):
+    # Readable, short IDs; the database uniqueness check handles rare collisions.
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    for _ in range(20):
+        candidate = "CS-" + "".join(secrets.choice(alphabet) for _ in range(8))
+        if not client.execute("SELECT 1 FROM users WHERE id=?", (candidate,)).rows:
+            return candidate
+    raise RuntimeError("Could not allocate a unique customer ID")
 def find_customer(email):
     with get_connection() as c:
         r = c.execute(
@@ -61,7 +70,7 @@ def find_or_create_google_customer(email, display_name):
             if not user["is_active"]:
                 raise ValueError("This account is disabled")
             return user, False
-        uid = str(uuid.uuid4())
+        uid = _new_customer_id(c)
         random_password_hash = hash_password(secrets.token_urlsafe(32))
         c.execute(
             """INSERT INTO users(id,email,phone,password_hash,display_name,role,is_active)

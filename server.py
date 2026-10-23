@@ -7,6 +7,7 @@ from routes.customer import bp as customer_bp
 from routes.admin import bp as admin_bp
 from routes.products import bp as products_bp
 from routes.orders import orders_bp
+from routes.downloads import downloads_bp
 app = Flask(__name__)
 CORS(app, origins=[
     "https://code-seller-static.onrender.com",
@@ -18,5 +19,6 @@ app.register_blueprint(customer_bp, url_prefix="/api/customer")
 app.register_blueprint(admin_bp, url_prefix="/api/admin")
 app.register_blueprint(products_bp, url_prefix="/api/products")
 app.register_blueprint(orders_bp, url_prefix="/api/orders")
+app.register_blueprint(downloads_bp, url_prefix="/api/downloads")
 if __name__ == "__main__":
     app.run(host=Config.HOST, port=Config.PORT)
