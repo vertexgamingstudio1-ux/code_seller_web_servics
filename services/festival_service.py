@@ -14,8 +14,10 @@ def ensure_festival_tables(client):
         client.execute("INSERT OR IGNORE INTO festival_campaigns (slug,name) VALUES (?,?)", (slug, name))
 
 def scheduler_payload(client):
-    ensure_festival_tables(client)
-    enabled = bool(client.execute("SELECT enabled FROM festival_scheduler_settings WHERE id=1").rows[0][0])
+    enabled_rows = client.execute(
+        "SELECT enabled FROM festival_scheduler_settings WHERE id=1"
+    ).rows
+    enabled = bool(enabled_rows and enabled_rows[0][0])
     records = client.execute("SELECT slug,name,reference_sale_date,enabled,campaign_end_date FROM festival_campaigns ORDER BY rowid").rows
     today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
     campaigns=[]
@@ -34,7 +36,10 @@ def scheduler_payload(client):
 
 def active_campaign(client, today=None):
     """Return at most one enabled campaign; a campaign runs from one day before its reference start through its end date."""
-    payload = scheduler_payload(client)
+    try:
+        payload = scheduler_payload(client)
+    except Exception:
+        return None
     today = today or datetime.now(ZoneInfo("Asia/Kolkata")).date()
     active = [c for c in payload["campaigns"] if c["enabled"] and payload["enabled"] and c["campaign_start_date"] and c["campaign_end_date"] and date.fromisoformat(c["campaign_start_date"]) <= today <= date.fromisoformat(c["campaign_end_date"])]
     return active[0] if active else None
@@ -47,3 +52,4 @@ def apply_campaign(product, campaign):
     result["festival_campaign"] = campaign["name"] if campaign and original > 0 else None
     result["price"] = (original * 70 + 50) // 100 if campaign and original > 0 else original
     return result
+
