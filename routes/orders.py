@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, request
+﻿from flask import Blueprint, jsonify, request
 from middleware.auth import require_customer
 from services.order_service import quote, create_order, create_cash_order, start_payment, verify_checkout, handle_webhook, customer_orders
 
@@ -40,11 +40,19 @@ def order_create():
 @require_customer
 def cash_order_create():
     try:
-        order_id=create_cash_order(request.auth["sub"],(request.get_json(silent=True) or {}).get("items"))
-        order=next(o for o in customer_orders(request.auth["sub"]) if o["id"]==order_id)
-        return jsonify(success=True,result={"order_id":order_id,"status":"pending_cash","total":order["total"],"currency":order["currency"]}),201
-    except ValueError as exc:return jsonify(success=False,error=str(exc)),400
-    except Exception:return jsonify(success=False,error="Could not create cash order"),503
+        items = (request.get_json(silent=True) or {}).get("items")
+        priced = quote(items)
+        order_id = create_cash_order(request.auth["sub"], items)
+        return jsonify(success=True, result={
+            "order_id": order_id,
+            "status": "pending_cash",
+            "total": priced["total"],
+            "currency": priced["currency"]
+        }), 201
+    except ValueError as exc:
+        return jsonify(success=False, error=str(exc)), 400
+    except Exception:
+        return jsonify(success=False, error="Could not create cash order"), 503
 
 @orders_bp.post("/online")
 @require_customer
@@ -88,3 +96,4 @@ def order_cancel(order_id):
             c.execute("UPDATE orders SET status='cancelled',updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND status='pending'",(order_id,request.auth["sub"]))
         return jsonify(success=True,result={"order_id":order_id,"status":"cancelled"})
     except Exception:return jsonify(success=False,error="Could not cancel order"),503
+
