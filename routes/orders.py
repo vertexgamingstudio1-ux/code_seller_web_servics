@@ -1,8 +1,15 @@
 ﻿from flask import Blueprint, jsonify, request
 from middleware.auth import require_customer
-from services.order_service import quote, create_order, create_cash_order, start_payment, verify_checkout, handle_webhook, customer_orders
+from services.order_service import quote, create_order, create_cash_order, start_payment, verify_checkout, handle_webhook, customer_orders, payment_options
 
 orders_bp = Blueprint("orders", __name__)
+
+@orders_bp.get("/payment-options")
+def get_payment_options():
+    try:
+        return jsonify(success=True, result=payment_options())
+    except Exception:
+        return jsonify(success=False, error="Could not load payment options"), 503
 
 @orders_bp.post("/quote")
 def order_quote():
@@ -53,6 +60,26 @@ def cash_order_create():
         return jsonify(success=False, error=str(exc)), 400
     except Exception:
         return jsonify(success=False, error="Could not create cash order"), 503
+
+@orders_bp.post("/upi")
+@require_customer
+def upi_order_create():
+    """Create a manually verified UPI order using the existing approval lifecycle."""
+    try:
+        items = (request.get_json(silent=True) or {}).get("items")
+        priced = quote(items)
+        order_id = create_cash_order(request.auth["sub"], items)
+        return jsonify(success=True, result={
+            "order_id": order_id,
+            "status": "pending_cash",
+            "total": priced["total"],
+            "currency": priced["currency"],
+            "payment_method": "upi"
+        }), 201
+    except ValueError as exc:
+        return jsonify(success=False, error=str(exc)), 400
+    except Exception:
+        return jsonify(success=False, error="Could not create UPI order"), 503
 
 @orders_bp.post("/online")
 @require_customer

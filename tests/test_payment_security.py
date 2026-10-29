@@ -199,6 +199,15 @@ class PaymentSecurityTests(unittest.TestCase):
         own_order=self.client_http.get("/api/orders/",headers={"Authorization":"Bearer customer-token"}).get_json()["result"]
         self.assertEqual(next(row for row in own_order if row["id"]==order_id)["status"],"pending_cash")
 
+    def test_upi_order_uses_server_price_and_existing_admin_review_status(self):
+        product={"id":"ABC123","name":"Test Product","price":1200,"currency":"INR","is_free":False,"is_published":True}
+        with patch.object(service.ProductService,"get_product",return_value=product):
+            response=self.client_http.post("/api/orders/upi",headers={"Authorization":"Bearer customer-token"},json={"items":[{"id":"ABC123","quantity":2,"unit_price":1}]})
+        self.assertEqual(response.status_code,201,response.get_json())
+        result=response.get_json()["result"]
+        self.assertEqual((result["status"],result["payment_method"],result["total"]),("pending_cash","upi",2400))
+        self.assertEqual(self.client.execute("SELECT user_id,status,total FROM orders WHERE id=?",(result["order_id"],)).rows[0],("customer-1","pending_cash",2400))
+
     def test_online_checkout_is_disabled_without_creating_order(self):
         response=self.client_http.post("/api/orders/online",headers={"Authorization":"Bearer customer-token"},json={"items":[{"id":"ABC123"}]})
         self.assertEqual(response.status_code,503)
@@ -210,6 +219,18 @@ class PaymentSecurityTests(unittest.TestCase):
         response=self.client_http.post(f"/api/admin/orders/{order_id}/confirm-cash",headers={"Authorization":"Bearer customer-token"})
         self.assertEqual(response.status_code,403)
         self.assertEqual(self.client.execute("SELECT status FROM orders WHERE id=?",(order_id,)).rows[0][0],"pending_cash")
+
+    def test_upi_details_are_publicly_readable_and_admin_writable_only(self):
+        public=self.client_http.get("/api/orders/payment-options")
+        self.assertEqual(public.status_code,200)
+        self.assertEqual(public.get_json()["result"]["upi_id"],"")
+        denied=self.client_http.put("/api/admin/payment-settings",headers={"Authorization":"Bearer customer-token"},json={"upi_id":"seller@upi"})
+        self.assertEqual(denied.status_code,403)
+        invalid=self.client_http.put("/api/admin/payment-settings",headers={"Authorization":"Bearer admin-token"},json={"upi_id":"not a UPI ID"})
+        self.assertEqual(invalid.status_code,400)
+        saved=self.client_http.put("/api/admin/payment-settings",headers={"Authorization":"Bearer admin-token"},json={"upi_id":"seller@upi"})
+        self.assertEqual(saved.status_code,200,saved.get_json())
+        self.assertEqual(self.client_http.get("/api/orders/payment-options").get_json()["result"]["upi_id"],"seller@upi")
 
     def test_admin_cash_approval_records_details_and_rejects_duplicate(self):
         order_id=self.create_cash_order()

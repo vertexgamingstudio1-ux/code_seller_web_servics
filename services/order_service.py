@@ -10,6 +10,18 @@ from db import get_connection
 from services.product_service import ProductService
 
 
+def ensure_payment_settings_schema(client):
+    client.execute("CREATE TABLE IF NOT EXISTS payment_settings (id INTEGER PRIMARY KEY CHECK (id=1), upi_id TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+    client.execute("INSERT OR IGNORE INTO payment_settings(id,upi_id) VALUES (1,'')")
+
+
+def payment_options():
+    with get_connection() as c:
+        ensure_payment_settings_schema(c)
+        rows = c.execute("SELECT upi_id FROM payment_settings WHERE id=1").rows
+    return {"upi_id": rows[0][0] if rows else ""}
+
+
 def ensure_payment_schema(client):
     """Add payment metadata to existing Turso databases without rewriting history."""
     columns = {r[1] for r in client.execute("PRAGMA table_info(payments)").rows}

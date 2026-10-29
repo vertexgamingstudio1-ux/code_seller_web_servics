@@ -44,6 +44,31 @@ def login():
 @require_admin
 def status():
     return jsonify(success=True, admin=True)
+
+@bp.get("/payment-settings")
+@require_admin
+def get_payment_settings():
+    try:
+        from services.order_service import payment_options
+        return jsonify(success=True, result=payment_options())
+    except Exception:
+        return fail("Could not load payment settings", 503)
+
+@bp.put("/payment-settings")
+@require_admin
+def save_payment_settings():
+    data = request.get_json(silent=True) or {}
+    upi_id = str(data.get("upi_id", "")).strip()
+    if len(upi_id) > 120 or (upi_id and not re.fullmatch(r"[A-Za-z0-9._-]{2,100}@[A-Za-z0-9.-]{2,30}", upi_id)):
+        return fail("Enter a valid UPI ID", 400)
+    try:
+        from services.order_service import ensure_payment_settings_schema
+        with get_connection() as client:
+            ensure_payment_settings_schema(client)
+            client.execute("UPDATE payment_settings SET upi_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=1", (upi_id,))
+        return jsonify(success=True, result={"upi_id": upi_id})
+    except Exception:
+        return fail("Could not save payment settings", 503)
 @bp.get("/dashboard")
 @require_admin
 def dashboard():
