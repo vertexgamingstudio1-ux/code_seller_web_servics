@@ -1,6 +1,7 @@
 import uuid
 from flask import Blueprint,jsonify,request
 from middleware.auth import require_customer
+from routes.community import list_posts as list_public_demand_posts
 from db import get_connection
 bp=Blueprint("customer",__name__)
 def ensure_demand_tables(client):
@@ -12,8 +13,12 @@ def me():
     c=request.auth
     return jsonify(success=True,customer={"id":c.get("sub"),"email":c.get("email"),"role":c.get("role")})
 @bp.get("/demands")
-@require_customer
 def demands():
+    return list_public_demand_posts("demands")
+
+@bp.get("/support-demands")
+@require_customer
+def support_demands():
     try:
         with get_connection() as client:
             ensure_demand_tables(client)

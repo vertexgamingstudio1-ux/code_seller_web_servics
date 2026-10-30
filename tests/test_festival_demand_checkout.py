@@ -1,5 +1,6 @@
 import datetime
 import io
+import os
 import pathlib
 import sqlite3
 import tempfile
@@ -305,7 +306,47 @@ class CodeSellerFeatureTests(unittest.TestCase):
         self.assertEqual(listed[0]["like_count"],1)
         self.assertEqual(listed[0]["author"],"Customer One")
         self.assertNotIn("email",listed[0])
+        demand=self.client.post("/api/community/demands/posts",headers=self.bearer(),json={"content":"Need a code product"})
+        public_demands=self.client.get("/api/customer/demands").get_json()["result"]
+        self.assertEqual(public_demands[0]["id"],demand.get_json()["result"]["id"])
         self.assertEqual(self.client.post("/api/community/discussions/posts",json={"content":"anonymous"}).status_code,401)
+        self.assertEqual(self.client.post("/api/community/discussions/likes/post/missing",json={}).status_code,401)
+        self.assertEqual(self.client.post("/api/community/discussions/posts/missing/replies",json={"content":"anonymous"}).status_code,401)
+        self.assertEqual(self.client.get("/api/customer/support-demands").status_code,401)
+
+    def test_public_reads_ignore_invalid_optional_jwt_but_writes_require_valid_customer(self):
+        import jwt
+        invalid_signature = patch.object(auth, "verify_token", side_effect=jwt.InvalidSignatureError("bad signature"))
+        with invalid_signature:
+            public = self.client.get("/api/customer/demands", headers={"Authorization": "Bearer invalid"})
+            plans = self.client.get("/api/memberships/plans", headers={"Authorization": "Bearer invalid"})
+        self.assertEqual(public.status_code, 200)
+        self.assertEqual(plans.status_code, 200)
+        self.assertNotIn("Signature mismatch", str(public.get_json()))
+        self.assertEqual(self.client.get("/api/customer/support-demands", headers={"Authorization": "Bearer invalid"}).status_code, 401)
+        self.assertEqual(self.client.post("/api/community/demands/posts", headers={"Authorization": "Bearer invalid"}, json={"content": "test"}).status_code, 401)
+        self.assertEqual(self.client.post("/api/community/demands/likes/post/missing", headers={"Authorization": "Bearer invalid"}).status_code, 401)
+        self.assertEqual(self.client.post("/api/memberships/applications", headers={"Authorization": "Bearer invalid"}, json={"plan_key": "basic"}).status_code, 401)
+
+    def test_valid_customer_jwt_still_authorizes_protected_write(self):
+        response = self.client.post("/api/community/demands/posts", headers=self.bearer(), json={"content": "A valid authenticated request"})
+        self.assertEqual(response.status_code, 201, response.get_json())
+
+    def test_real_valid_and_invalid_jwt_protected_route_behavior(self):
+        import jwt
+        from auth.jwt import verify_token as real_verify_token
+        secret = "test-only-jwt-secret-long-enough-for-hs256"
+        with patch.dict(os.environ, {"JWT_SECRET": secret}):
+            valid = jwt.encode({"sub":"customer-1","role":"customer","exp":datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(minutes=5)},secret,algorithm="HS256")
+            invalid = jwt.encode({"sub":"customer-1","role":"customer","exp":datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(minutes=5)},"different-test-secret-long-enough-for-hs256",algorithm="HS256")
+            expired = jwt.encode({"sub":"customer-1","role":"customer","exp":datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=1)},secret,algorithm="HS256")
+            with patch.object(auth,"verify_token",side_effect=real_verify_token):
+                self.assertEqual(self.client.post("/api/community/demands/posts",headers={"Authorization":"Bearer "+valid},json={"content":"signed correctly"}).status_code,201)
+                bad = self.client.post("/api/community/demands/posts",headers={"Authorization":"Bearer "+invalid},json={"content":"wrong signature"})
+                old = self.client.post("/api/community/demands/posts",headers={"Authorization":"Bearer "+expired},json={"content":"expired token"})
+        self.assertEqual(bad.status_code,401)
+        self.assertEqual(old.status_code,401)
+        self.assertNotIn("Signature mismatch",bad.get_json()["error"])
 
     def test_admin_order_search_is_exact_and_authorized(self):
         self.database.client.execute("INSERT INTO orders(id,user_id,status,subtotal,total,currency) VALUES('CSO-ABC123','customer-1','pending_cash',999,999,'INR')")

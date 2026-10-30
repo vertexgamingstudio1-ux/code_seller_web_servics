@@ -1,9 +1,12 @@
 from functools import wraps
+import logging
 
 import jwt
 from flask import jsonify, request
 
 from auth.jwt import verify_token
+
+logger = logging.getLogger(__name__)
 
 
 def require_role(role):
@@ -21,17 +24,14 @@ def require_role(role):
             try:
                 claims = verify_token(token)
             except jwt.ExpiredSignatureError:
-                print("AUTH DEBUG: TOKEN EXPIRED")
-                return jsonify({"success": False, "error": "Token expired"}), 401
-            except jwt.InvalidSignatureError:
-                print("AUTH DEBUG: SIGNATURE MISMATCH")
-                return jsonify({"success": False, "error": "Signature mismatch"}), 401
+                logger.warning("Rejected expired JWT for protected route")
+                return jsonify({"success": False, "error": "Your session has expired. Please sign in again."}), 401
             except jwt.InvalidTokenError as exc:
-                print("AUTH DEBUG: INVALID TOKEN:", type(exc).__name__)
-                return jsonify({"success": False, "error": "Invalid token"}), 401
+                logger.warning("Rejected invalid JWT for protected route (%s)", type(exc).__name__)
+                return jsonify({"success": False, "error": "Your session is invalid. Please sign in again."}), 401
             except Exception as exc:
-                print("AUTH DEBUG: OTHER ERROR:", type(exc).__name__)
-                return jsonify({"success": False, "error": "Authentication error"}), 401
+                logger.error("JWT verification failed for protected route (%s)", type(exc).__name__)
+                return jsonify({"success": False, "error": "Could not verify your session. Please sign in again."}), 401
 
             if claims.get("role") != role:
                 return jsonify({"success": False, "error": "Forbidden"}), 403
