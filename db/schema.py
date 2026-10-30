@@ -61,6 +61,13 @@ FOREIGN KEY(user_id) REFERENCES users(id),
 FOREIGN KEY(product_id) REFERENCES products(id),
 FOREIGN KEY(product_version_id) REFERENCES product_versions(id),
 FOREIGN KEY(order_id) REFERENCES orders(id))""",
+"""CREATE TABLE IF NOT EXISTS cash_approvals (
+order_id TEXT PRIMARY KEY,
+customer_id TEXT NOT NULL,
+amount INTEGER NOT NULL,
+currency TEXT NOT NULL DEFAULT 'INR',
+approved_by TEXT NOT NULL,
+approved_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""",
 """CREATE TABLE IF NOT EXISTS refunds (
 id TEXT PRIMARY KEY, order_id TEXT NOT NULL, payment_id TEXT,
 amount INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'INR',

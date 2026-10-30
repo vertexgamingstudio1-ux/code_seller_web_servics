@@ -369,23 +369,57 @@ def delete_product(product_id):
 def orders():
     try:
         from services.order_service import ensure_cash_approval_schema
-        with get_connection() as client: ensure_cash_approval_schema(client)
-        data = rows("""SELECT o.id,o.user_id,u.email,o.status,o.subtotal,o.total,
-            o.currency,o.created_at,o.updated_at
-            FROM orders o LEFT JOIN users u ON u.id=o.user_id
-            ORDER BY o.created_at DESC LIMIT 500""",
-            fields=("id","user_id","email","status","subtotal","total","currency","created_at","updated_at"))
+        with get_connection() as client:
+            ensure_cash_approval_schema(client)
+            order_rows = client.execute("""
+                SELECT o.id,o.user_id,u.email,o.status,o.subtotal,o.total,
+                       o.currency,o.created_at,o.updated_at
+                FROM orders o
+                LEFT JOIN users u ON u.id=o.user_id
+                ORDER BY o.created_at DESC LIMIT 500
+            """).rows
+            data = [
+                dict(zip(
+                    ("id","user_id","email","status","subtotal","total",
+                     "currency","created_at","updated_at"), row
+                ))
+                for row in order_rows
+            ]
+            payment_rows = client.execute("""
+                SELECT id,order_id,provider,provider_payment_id,status,
+                       amount,currency,paid_at,created_at
+                FROM payments ORDER BY created_at
+            """).rows
+            approval_rows = client.execute("""
+                SELECT order_id,customer_id,amount,currency,approved_by,approved_at
+                FROM cash_approvals
+            """).rows
+        payments_by_order = {}
+        for row in payment_rows:
+            payment = dict(zip(
+                ("id","order_id","provider","provider_payment_id","status",
+                 "amount","currency","paid_at","created_at"), row
+            ))
+            payments_by_order.setdefault(payment["order_id"], []).append(payment)
+        approvals_by_order = {}
+        for row in approval_rows:
+            approval = dict(zip(
+                ("order_id","customer_id","amount","currency","approved_by",
+                 "approved_at"), row
+            ))
+            approvals_by_order.setdefault(approval["order_id"], []).append(approval)
         for order in data:
-            order["payments"]=rows("SELECT id,provider,provider_payment_id,status,amount,currency,paid_at,created_at FROM payments WHERE order_id=? ORDER BY created_at",(order["id"],),("id","provider","provider_payment_id","status","amount","currency","paid_at","created_at"))
-            approvals=rows("SELECT order_id,customer_id,amount,currency,approved_by,approved_at FROM cash_approvals WHERE order_id=?",(order["id"],),("order_id","customer_id","amount","currency","approved_by","approved_at"))
-            order["cash_approval"]=approvals[0] if approvals else None
-            order["can_confirm_cash"]=order["status"]=="pending_cash" and not approvals
+            approvals = approvals_by_order.get(order["id"], [])
+            order["payments"] = payments_by_order.get(order["id"], [])
+            order["cash_approval"] = approvals[0] if approvals else None
+            order["can_confirm_cash"] = (
+                order["status"] == "pending_cash" and not approvals
+            )
         return jsonify(success=True, result=data)
-    except Exception as exc:
+    except Exception:
         import traceback
         traceback.print_exc()
         return fail("Could not load orders", 503)
-
 @bp.post("/orders/<order_id>/confirm-cash")
 @require_admin
 def confirm_cash_received(order_id):
