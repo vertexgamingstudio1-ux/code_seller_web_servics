@@ -302,10 +302,12 @@ def create_product_with_code():
                     archive.writestr(file_name, content)
             package_path = str(target.relative_to(upload_root))
         with get_connection() as client:
+            from services.product_service import ensure_publication_timestamp
+            ensure_publication_timestamp(client)
             client.execute("""INSERT INTO products
-                (id,name,slug,description,category,price,currency,is_free,is_published)
-                VALUES (?,?,?,?,?,?,?,?,?)""",
-                (product_id,name,slug,description,category,price,"INR",int(is_free),int(is_published)))
+                (id,name,slug,description,category,price,currency,is_free,is_published,published_at)
+                VALUES (?,?,?,?,?,?,?,?,?,CASE WHEN ?=1 THEN CURRENT_TIMESTAMP ELSE NULL END)""",
+                (product_id,name,slug,description,category,price,"INR",int(is_free),int(is_published),int(is_published)))
             client.execute("""INSERT INTO product_versions
                 (id,product_id,version,changelog,single_file_path,package_file_path,is_active)
                 VALUES (?,?,?,?,?,?,1)""",
@@ -336,6 +338,13 @@ def update_product(product_id):
     sql = "UPDATE products SET " + ", ".join(k + " = ?" for k in updates) + ", updated_at=CURRENT_TIMESTAMP WHERE id = ?"
     try:
         with get_connection() as client:
+            if "is_published" in updates:
+                from services.product_service import ensure_publication_timestamp
+                ensure_publication_timestamp(client)
+                if updates["is_published"]:
+                    sql = "UPDATE products SET " + ", ".join(k + " = ?" for k in updates) + ", published_at=CASE WHEN is_published=0 OR published_at IS NULL THEN CURRENT_TIMESTAMP ELSE published_at END, updated_at=CURRENT_TIMESTAMP WHERE id = ?"
+                else:
+                    sql = "UPDATE products SET " + ", ".join(k + " = ?" for k in updates) + ", published_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE id = ?"
             result = client.execute(sql, tuple(updates.values()) + (product_id,))
         return jsonify(success=True, updated=True)
     except Exception:

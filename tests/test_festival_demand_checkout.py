@@ -190,6 +190,68 @@ class CodeSellerFeatureTests(unittest.TestCase):
         free=self.client.get("/api/products/free-1",headers=self.bearer()).get_json()["result"]
         self.assertEqual((free["price"],free["festival_discount_percent"],free["membership_discount_percent"]),(0,0,0))
 
+    def test_product_catalog_splits_new_arrivals_by_publication_timestamp(self):
+        now=datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+        self.client.get("/api/products/")  # applies the additive published_at migration for this legacy fixture
+        self.database.client.execute("UPDATE products SET published_at=? WHERE id='product-1'",(now.isoformat().replace("+00:00","Z"),))
+        ages={
+            "age-9d23h":now-datetime.timedelta(days=9,hours=23),
+            "age-10d":now-datetime.timedelta(days=10),
+            "age-over-10d":now-datetime.timedelta(days=10,seconds=1),
+        }
+        for product_id,published_at in ages.items():
+            self.database.client.execute("""INSERT INTO products
+                (id,name,slug,description,category,price,currency,is_free,is_published,published_at)
+                VALUES(?,?,?,?,?,999,'INR',0,1,?)""",
+                (product_id,product_id,product_id,"", "Tools",published_at.isoformat().replace("+00:00","Z")))
+        response=self.client.get("/api/products/")
+        self.assertEqual(response.status_code,200,response.get_json())
+        payload=response.get_json()["result"]
+        arrivals={p["id"]:p for p in payload["new_arrivals"]}
+        normal={p["id"]:p for p in payload["products"]}
+        self.assertEqual(set(arrivals),{"product-1","age-9d23h"})
+        self.assertEqual(set(normal),{"age-10d","age-over-10d"})
+        self.assertEqual(set(arrivals)|set(normal),{"product-1","age-9d23h","age-10d","age-over-10d"})
+        self.assertEqual(payload["count"],len(arrivals)+len(normal))
+        self.assertEqual(arrivals["product-1"]["is_new_arrival"],True)
+        self.assertEqual(normal["age-10d"]["is_new_arrival"],False)
+
+    def test_unpublish_and_republish_starts_a_fresh_arrival_window(self):
+        self.client.get("/api/products/")  # applies the migration on the legacy fixture
+        earlier=(datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=20)).replace(microsecond=0)
+        self.database.client.execute("UPDATE products SET published_at=? WHERE id='product-1'",(earlier.isoformat().replace("+00:00","Z"),))
+        self.assertFalse(self.client.get("/api/products/product-1").get_json()["result"]["is_new_arrival"])
+        self.assertEqual(self.client.patch("/api/admin/products/product-1",headers=self.bearer("admin"),json={"is_published":False}).status_code,200)
+        self.assertEqual(self.client.patch("/api/admin/products/product-1",headers=self.bearer("admin"),json={"is_published":True}).status_code,200)
+        republished=self.client.get("/api/products/product-1").get_json()["result"]
+        self.assertTrue(republished["is_new_arrival"])
+        saved=self.database.client.execute("SELECT published_at FROM products WHERE id='product-1'").rows[0][0]
+        saved_at=datetime.datetime.fromisoformat(saved.replace("Z","+00:00"))
+        if saved_at.tzinfo is None:
+            saved_at=saved_at.replace(tzinfo=datetime.timezone.utc)
+        self.assertGreaterEqual(saved_at,earlier)
+
+    def test_catalog_and_detail_share_new_arrival_prices_for_members_and_campaigns(self):
+        self.client.get("/api/memberships/plans")
+        self.client.get("/api/products/")  # add published_at to the legacy fixture before setting it
+        now=datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+        self.database.client.execute("UPDATE products SET published_at=? WHERE id='product-1'",(now.isoformat().replace("+00:00","Z"),))
+        start=(self.today + datetime.timedelta(days=1)).isoformat();end=(self.today + datetime.timedelta(days=3)).isoformat()
+        self.save_schedule(self.campaign_payload(start,end))
+        list_url="/api/products/"
+        anonymous=self.client.get(list_url).get_json()["result"]
+        arrival=anonymous["new_arrivals"][0]
+        detail=self.client.get("/api/products/product-1").get_json()["result"]
+        self.assertEqual((arrival["price"],arrival["festival_discount_amount"],arrival["membership_discount_amount"]),(699,300,0))
+        self.assertEqual((arrival["price"],arrival["festival_discount_amount"],arrival["membership_discount_amount"]),(detail["price"],detail["festival_discount_amount"],detail["membership_discount_amount"]))
+        expires=(now+datetime.timedelta(days=30)).isoformat().replace("+00:00","Z")
+        self.database.client.execute("INSERT INTO membership_applications(membership_id,customer_id,plan_key,status,activated_at,expires_at) VALUES('CSM-PREMIUM','customer-1','premium','approved',?,?)",(now.isoformat().replace("+00:00","Z"),expires))
+        member_payload=self.client.get(list_url,headers=self.bearer()).get_json()["result"]
+        member_arrival=member_payload["new_arrivals"][0]
+        member_detail=self.client.get("/api/products/product-1",headers=self.bearer()).get_json()["result"]
+        self.assertEqual((member_arrival["price"],member_arrival["festival_discount_percent"],member_arrival["membership_discount_percent"],member_arrival["festival_discount_amount"],member_arrival["membership_discount_amount"]),(629,30,10,300,70))
+        self.assertEqual((member_arrival["price"],member_arrival["festival_discount_amount"],member_arrival["membership_discount_amount"]),(member_detail["price"],member_detail["festival_discount_amount"],member_detail["membership_discount_amount"]))
+
     def test_pending_and_expired_memberships_do_not_receive_member_discount(self):
         self.client.get("/api/memberships/plans")
         self.database.client.execute("INSERT INTO membership_applications(membership_id,customer_id,plan_key,status) VALUES('CSM-PENDING','customer-1','premium','pending')")
