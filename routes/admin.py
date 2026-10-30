@@ -118,6 +118,17 @@ def save_festival_scheduler():
     try:
         with get_connection() as client:
             ensure_festival_tables(client)
+            from routes.campaigns import ensure_campaign_table, _dates
+            ensure_campaign_table(client)
+            if bool(data.get("enabled",False)):
+                for raw_start,raw_end,campaign_enabled,slug in normalized:
+                    if not campaign_enabled or not raw_start or not raw_end:continue
+                    proposed_start=date.fromisoformat(raw_start)-timedelta(days=1);proposed_end=date.fromisoformat(raw_end)
+                    for custom in client.execute("SELECT slug,name,start_date,end_date,recurring_yearly,enabled,archived FROM event_campaigns WHERE enabled=1 AND archived=0").rows:
+                        item={"slug":custom[0],"name":custom[1],"start_date":custom[2],"end_date":custom[3],"recurring_yearly":bool(custom[4])}
+                        custom_start,custom_end=_dates(item,date.today())
+                        if proposed_start<=custom_end and custom_start<=proposed_end:
+                            return fail("Festival dates overlap with the active "+custom[1]+" campaign",409)
             client.execute("UPDATE festival_scheduler_settings SET enabled=?,updated_at=CURRENT_TIMESTAMP WHERE id=1",(int(bool(data.get("enabled",False))),))
             for raw_start,raw_end,campaign_enabled,slug in normalized:
                 client.execute("UPDATE festival_campaigns SET reference_sale_date=?,campaign_end_date=?,enabled=?,updated_at=CURRENT_TIMESTAMP WHERE slug=?",(raw_start,raw_end,campaign_enabled,slug))
@@ -510,6 +521,59 @@ def payments():
             fields=("id","order_id","customer_id","email","provider","provider_order_id","provider_payment_id","status","amount","currency","paid_at","created_at"))
         return jsonify(success=True,result=data)
     except Exception:return fail("Could not load payments",503)
+
+@bp.get("/orders/search")
+@require_admin
+def search_orders():
+    """Exact Order ID or Customer ID search for the existing admin order screen."""
+    query = str(request.args.get("q", "")).strip()
+    if not query or len(query) > 128:
+        return fail("Enter an Order ID or Customer ID", 400)
+    try:
+        with get_connection() as client:
+            client.execute("""CREATE TABLE IF NOT EXISTS cash_payment_receipts (
+                order_id TEXT PRIMARY KEY,customer_id TEXT NOT NULL,transaction_reference TEXT NOT NULL,
+                screenshot_key TEXT NOT NULL,uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        found = rows("""SELECT o.id,o.user_id,u.display_name,u.email,u.phone,o.status,
+            o.subtotal,o.total,o.currency,o.created_at,o.updated_at
+            FROM orders o JOIN users u ON u.id=o.user_id
+            WHERE o.id=? OR o.user_id=? ORDER BY o.created_at DESC LIMIT 50""",
+            (query, query), ("id","customer_id","display_name","email","phone","status",
+            "subtotal","total","currency","created_at","updated_at"))
+        result=[]
+        for order in found:
+            order["items"] = rows("""SELECT i.product_id,p.name,i.quantity,i.unit_price,i.total_price
+                FROM order_items i LEFT JOIN products p ON p.id=i.product_id WHERE i.order_id=?""",
+                (order["id"],),("product_id","name","quantity","unit_price","total_price"))
+            order["payments"] = rows("""SELECT provider,status,amount,currency,provider_payment_id,paid_at,created_at
+                FROM payments WHERE order_id=? ORDER BY created_at""",(order["id"],),
+                ("provider","status","amount","currency","transaction_reference","paid_at","created_at"))
+            approvals = rows("SELECT approved_by,approved_at FROM cash_approvals WHERE order_id=?",
+                (order["id"],),("approved_by","approved_at"))
+            order["cash_approval"] = approvals[0] if approvals else None
+            result.append(order)
+            receipt=rows("SELECT transaction_reference,uploaded_at FROM cash_payment_receipts WHERE order_id=?",(order["id"],),("transaction_reference","uploaded_at"))
+            if receipt:
+                order["payment_receipt"]={"transaction_reference":receipt[0]["transaction_reference"],"uploaded_at":receipt[0]["uploaded_at"],"has_screenshot":True}
+            else:order["payment_receipt"]=None
+        return jsonify(success=True,result=result)
+    except Exception:
+        return fail("Could not search orders",503)
+
+@bp.get("/orders/<order_id>/receipt")
+@require_admin
+def order_receipt(order_id):
+    try:
+        from services.object_storage import private_url
+        with get_connection() as client:
+            client.execute("""CREATE TABLE IF NOT EXISTS cash_payment_receipts (
+                order_id TEXT PRIMARY KEY,customer_id TEXT NOT NULL,transaction_reference TEXT NOT NULL,
+                screenshot_key TEXT NOT NULL,uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        receipt=rows("SELECT screenshot_key FROM cash_payment_receipts WHERE order_id=?",(order_id,),("screenshot_key",))
+        if not receipt:return fail("Payment screenshot not found",404)
+        return jsonify(success=True,result={"url":private_url(receipt[0]["screenshot_key"],expires=300),"expires_in":300})
+    except Exception:return fail("Could not open payment screenshot",503)
+
 @bp.get("/versions")
 @require_admin
 def versions():

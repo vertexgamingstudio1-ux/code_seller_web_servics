@@ -4,6 +4,34 @@ from services.order_service import quote, create_order, create_cash_order, start
 
 orders_bp = Blueprint("orders", __name__)
 
+@orders_bp.post("/<order_id>/receipt")
+@require_customer
+def upload_manual_payment_receipt(order_id):
+    """Store one private receipt for an existing pending UPI order."""
+    from db import get_connection
+    from services.object_storage import upload, StorageNotConfigured
+    reference=str(request.form.get("transaction_reference","")).strip()
+    image=request.files.get("screenshot")
+    if not reference or len(reference)>160 or not image:
+        return jsonify(success=False,error="Provide a transaction reference and payment screenshot"),400
+    try:
+        with get_connection() as c:
+            c.execute("""CREATE TABLE IF NOT EXISTS cash_payment_receipts (
+                order_id TEXT PRIMARY KEY,customer_id TEXT NOT NULL,transaction_reference TEXT NOT NULL,
+                screenshot_key TEXT NOT NULL,uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(order_id) REFERENCES orders(id))""")
+            order=c.execute("SELECT id FROM orders WHERE id=? AND user_id=? AND status='pending_cash'",(order_id,request.auth["sub"])).rows
+            exists=c.execute("SELECT 1 FROM cash_payment_receipts WHERE order_id=?",(order_id,)).rows
+        if not order:return jsonify(success=False,error="Pending UPI order not found"),404
+        if exists:return jsonify(success=False,error="A receipt is already attached to this order. Contact support for corrections."),409
+        key=upload(image,prefix="order-receipts",private=True,max_bytes=5*1024*1024)
+        with get_connection() as c:
+            c.execute("INSERT INTO cash_payment_receipts(order_id,customer_id,transaction_reference,screenshot_key) VALUES(?,?,?,?)",(order_id,request.auth["sub"],reference,key))
+        return jsonify(success=True,result={"order_id":order_id,"status":"submitted_for_admin_review"}),201
+    except ValueError as exc:return jsonify(success=False,error=str(exc)),400
+    except StorageNotConfigured as exc:return jsonify(success=False,error=str(exc)),503
+    except Exception:return jsonify(success=False,error="Could not submit payment receipt"),503
+
 @orders_bp.get("/payment-options")
 def get_payment_options():
     try:

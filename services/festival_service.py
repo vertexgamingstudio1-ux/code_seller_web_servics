@@ -37,6 +37,19 @@ def scheduler_payload(client):
 def active_campaign(client, today=None):
     """Return at most one enabled campaign; a campaign runs from one day before its reference start through its end date."""
     try:
+        from routes.campaigns import ensure_campaign_table, _dates
+        ensure_campaign_table(client)
+        today = today or datetime.now(ZoneInfo("Asia/Kolkata")).date()
+        custom_rows=client.execute("SELECT slug,name,campaign_title,banner_image_url,theme_color,start_date,end_date,enabled,archived,recurring_yearly FROM event_campaigns WHERE enabled=1 AND archived=0 ORDER BY created_at DESC").rows
+        custom=[]
+        for r in custom_rows:
+            item=dict(zip(("slug","name","campaign_title","banner_image_url","theme_color","start_date","end_date","enabled","archived","recurring_yearly"),r))
+            item["recurring_yearly"]=bool(item["recurring_yearly"])
+            start,end=_dates(item,today)
+            if start<=today<=end:
+                item["campaign_start_date"]=start.isoformat();item["campaign_end_date"]=end.isoformat();custom.append(item)
+        if len(custom)==1:return custom[0]
+        if len(custom)>1:return None
         payload = scheduler_payload(client)
     except Exception:
         return None
