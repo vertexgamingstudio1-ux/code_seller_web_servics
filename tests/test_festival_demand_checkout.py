@@ -375,7 +375,9 @@ class CodeSellerFeatureTests(unittest.TestCase):
     def test_membership_plans_ids_review_expiry_and_renewal(self):
         plans=self.client.get("/api/memberships/plans").get_json()["result"]
         self.assertEqual([p["plan_key"] for p in plans],["basic","plus","premium"])
-        self.assertIsNone(next(p for p in plans if p["plan_key"]=="plus")["price_paise"])
+        self.assertEqual(next(p for p in plans if p["plan_key"]=="basic")["price_paise"],0)
+        self.assertEqual(next(p for p in plans if p["plan_key"]=="plus")["price_paise"],19900)
+        self.assertEqual(next(p for p in plans if p["plan_key"]=="premium")["price_paise"],39900)
         config=self.client.put("/api/admin/membership-plans/plus",headers=self.bearer("admin"),json={"name":"Plus","price_paise":50000,"duration_days":30,"benefits":["Priority support"]})
         self.assertEqual(config.status_code,200,config.get_json())
         def apply_paid():

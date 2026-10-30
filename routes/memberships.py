@@ -10,7 +10,7 @@ from middleware.auth import require_customer
 from services.object_storage import StorageNotConfigured, upload, private_url
 
 bp = Blueprint("memberships", __name__)
-PLAN_DEFAULTS = (("basic", "Basic"), ("plus", "Plus"), ("premium", "Premium"))
+PLAN_DEFAULTS = (("basic", "Basic", 0), ("plus", "Plus", 19900), ("premium", "Premium", 39900))
 
 
 def ensure_tables(c):
@@ -36,10 +36,11 @@ def ensure_tables(c):
         action TEXT NOT NULL, note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(membership_id) REFERENCES membership_applications(membership_id))""")
     c.execute("CREATE INDEX IF NOT EXISTS memberships_customer_recent ON membership_applications(customer_id,applied_at)")
-    for key, name in PLAN_DEFAULTS:
+    for key, name, price_paise in PLAN_DEFAULTS:
         discount={"basic":0,"plus":5,"premium":10}[key]
         c.execute("INSERT OR IGNORE INTO membership_plans(plan_key,name,price_paise,duration_days,benefits_json,is_active,product_discount_percent) VALUES(?,?,?,NULL,'[]',1,?)",
-                  (key,name,0 if key == "basic" else None,discount))
+                  (key,name,price_paise,discount))
+        c.execute("UPDATE membership_plans SET price_paise=? WHERE plan_key=? AND price_paise IS NULL",(price_paise,key))
 
 
 def _plans(c):
