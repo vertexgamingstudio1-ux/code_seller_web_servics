@@ -7,7 +7,7 @@ from urllib.parse import urljoin
 
 import requests
 from db import get_connection
-from services.product_service import ProductService
+from services.product_service import ProductService, _membership_discount
 
 
 def ensure_payment_settings_schema(client):
@@ -34,43 +34,72 @@ def ensure_payment_schema(client):
     client.execute("CREATE UNIQUE INDEX IF NOT EXISTS payments_provider_order_id_uq ON payments(provider,provider_order_id) WHERE provider_order_id IS NOT NULL")
 
 
-def _priced_items(items):
+def _priced_items(items, user_id=None):
     if not isinstance(items, list) or not items or len(items) > 100:
         raise ValueError("Provide between 1 and 100 cart items")
+    membership_percent, membership_plan_name = _membership_discount(user_id)
     result = []
     for item in items:
         if not isinstance(item, dict):
             raise ValueError("Invalid cart item")
-        product = ProductService.get_product(str(item.get("id", "")))
+        product = ProductService.get_product(str(item.get("id", "")), membership_percent=membership_percent)
         try:
             quantity = int(item.get("quantity", 1))
         except (ValueError, TypeError):
             raise ValueError("Invalid quantity") from None
         if not product or quantity < 1 or quantity > 99:
             raise ValueError("A product or quantity is invalid")
+        product["membership_plan_name"] = membership_plan_name if membership_percent else None
         result.append((product, quantity))
     return result
 
 
-def quote(items):
-    rows = _priced_items(items)
-    lines = [{"id": p["id"], "name": p["name"], "quantity": q,
-              "unit_price": p["price"], "total": p["price"] * q,
-              "discount_percent": p.get("festival_discount_percent", 0)} for p, q in rows]
-    return {"items": lines, "total": sum(x["total"] for x in lines), "currency": "INR"}
+def quote(items, user_id=None):
+    rows = _priced_items(items, user_id)
+    lines = []
+    for p, q in rows:
+        lines.append({"id":p["id"],"name":p["name"],"quantity":q,
+            "original_unit_price":p["original_price"],"unit_price":p["price"],
+            "total":p["price"]*q,"festival_discount_percent":p["festival_discount_percent"],
+            "festival_discount_amount":p["festival_discount_amount"]*q,
+            "membership_discount_percent":p["membership_discount_percent"],
+            "membership_discount_amount":p["membership_discount_amount"]*q,
+            "membership_plan_name":p.get("membership_plan_name"),
+            "discount_amount":p["discount_amount"]*q})
+    subtotal=sum(x["original_unit_price"]*x["quantity"] for x in lines)
+    total=sum(x["total"] for x in lines)
+    return {"items":lines,"subtotal":subtotal,"discount_total":subtotal-total,"total":total,"currency":"INR"}
+
+
+def ensure_order_pricing_schema(client):
+    columns={r[1] for r in client.execute("PRAGMA table_info(order_items)").rows}
+    additions=(("original_unit_price","INTEGER NOT NULL DEFAULT 0"),
+        ("festival_discount_percent","INTEGER NOT NULL DEFAULT 0"),
+        ("membership_discount_percent","INTEGER NOT NULL DEFAULT 0"),
+        ("festival_discount_amount","INTEGER NOT NULL DEFAULT 0"),
+        ("membership_discount_amount","INTEGER NOT NULL DEFAULT 0"))
+    added_original=False
+    for name,definition in additions:
+        if name not in columns:
+            client.execute(f"ALTER TABLE order_items ADD COLUMN {name} {definition}")
+            added_original=added_original or name=="original_unit_price"
+    if added_original:
+        client.execute("UPDATE order_items SET original_unit_price=unit_price")
 
 
 def _create_order(user_id, items, status):
-    rows = _priced_items(items)
-    subtotal = sum(p["price"] * q for p, q in rows)
+    rows = _priced_items(items, user_id)
+    subtotal = sum(p["original_price"] * q for p, q in rows)
+    total = sum(p["price"] * q for p, q in rows)
     order_id = "CSO-" + uuid.uuid4().hex[:16].upper()
     try:
         with get_connection() as c:
-            c.execute("INSERT INTO orders(id,user_id,status,subtotal,total,currency) VALUES(?,?,?,?,?,'INR')", (order_id, user_id, status, subtotal, subtotal))
+            ensure_order_pricing_schema(c)
+            c.execute("INSERT INTO orders(id,user_id,status,subtotal,total,currency) VALUES(?,?,?,?,?,'INR')", (order_id, user_id, status, subtotal, total))
             for product, quantity in rows:
                 versions=c.execute("SELECT id FROM product_versions WHERE product_id=? AND is_active=1 ORDER BY created_at DESC LIMIT 1",(product["id"],)).rows
                 version_id=versions[0][0] if versions else None
-                c.execute("INSERT INTO order_items(id,order_id,product_id,product_version_id,quantity,unit_price,total_price) VALUES(?,?,?,?,?,?,?)", (str(uuid.uuid4()), order_id, product["id"], version_id, quantity, product["price"], product["price"] * quantity))
+                c.execute("INSERT INTO order_items(id,order_id,product_id,product_version_id,quantity,unit_price,total_price,original_unit_price,festival_discount_percent,membership_discount_percent,festival_discount_amount,membership_discount_amount) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (str(uuid.uuid4()), order_id, product["id"], version_id, quantity, product["price"], product["price"] * quantity, product["original_price"], product["festival_discount_percent"], product["membership_discount_percent"], product["festival_discount_amount"], product["membership_discount_amount"]))
     except Exception as exc:
         raise RuntimeError("Could not save the order") from exc
     return order_id
@@ -82,6 +111,14 @@ def create_order(user_id, items):
 
 def create_cash_order(user_id, items):
     return _create_order(user_id, items, "pending_cash")
+
+
+def order_total(order_id, user_id):
+    with get_connection() as c:
+        rows=c.execute("SELECT total FROM orders WHERE id=? AND user_id=?",(order_id,user_id)).rows
+    if not rows:
+        raise LookupError("Order not found")
+    return rows[0][0]
 
 
 def ensure_cash_approval_schema(client):
@@ -190,11 +227,12 @@ def handle_webhook(raw_body, signature):
 
 def customer_orders(user_id):
     with get_connection() as c:
+        ensure_order_pricing_schema(c)
         orders = c.execute("SELECT id,user_id,status,subtotal,total,currency,created_at,updated_at FROM orders WHERE user_id=? ORDER BY created_at DESC", (user_id,)).rows
         result=[]
         for row in orders:
             data=dict(zip(("id","customer_id","status","subtotal","total","currency","created_at","updated_at"),row))
-            data["items"]=[dict(zip(("product_id","name","quantity","unit_price","total_price"),item)) for item in c.execute("SELECT i.product_id,p.name,i.quantity,i.unit_price,i.total_price FROM order_items i JOIN products p ON p.id=i.product_id WHERE i.order_id=?", (data["id"],)).rows]
+            data["items"]=[dict(zip(("product_id","name","quantity","unit_price","total_price","original_unit_price","festival_discount_percent","membership_discount_percent","festival_discount_amount","membership_discount_amount"),item)) for item in c.execute("SELECT i.product_id,p.name,i.quantity,i.unit_price,i.total_price,i.original_unit_price,i.festival_discount_percent,i.membership_discount_percent,i.festival_discount_amount,i.membership_discount_amount FROM order_items i JOIN products p ON p.id=i.product_id WHERE i.order_id=?", (data["id"],)).rows]
             data["payments"]=[dict(zip(("provider","status","amount","currency","paid_at"),p)) for p in c.execute("SELECT provider,status,amount,currency,paid_at FROM payments WHERE order_id=? ORDER BY created_at",(data["id"],)).rows]
             try:
                 approval=c.execute("SELECT approved_at FROM cash_approvals WHERE order_id=?",(data["id"],)).rows

@@ -17,7 +17,12 @@ def ensure_tables(c):
     c.execute("""CREATE TABLE IF NOT EXISTS membership_plans (
         plan_key TEXT PRIMARY KEY, name TEXT NOT NULL, price_paise INTEGER,
         duration_days INTEGER, benefits_json TEXT NOT NULL DEFAULT '[]',
-        is_active INTEGER NOT NULL DEFAULT 1, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+        is_active INTEGER NOT NULL DEFAULT 1, product_discount_percent INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
+    plan_columns={r[1] for r in c.execute("PRAGMA table_info(membership_plans)").rows}
+    if "product_discount_percent" not in plan_columns:
+        c.execute("ALTER TABLE membership_plans ADD COLUMN product_discount_percent INTEGER NOT NULL DEFAULT 0")
+        c.execute("UPDATE membership_plans SET product_discount_percent=CASE plan_key WHEN 'plus' THEN 5 WHEN 'premium' THEN 10 ELSE 0 END")
     c.execute("""CREATE TABLE IF NOT EXISTS membership_applications (
         membership_id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, plan_key TEXT NOT NULL,
         amount_paise INTEGER NOT NULL DEFAULT 0, duration_days INTEGER,
@@ -32,18 +37,38 @@ def ensure_tables(c):
         FOREIGN KEY(membership_id) REFERENCES membership_applications(membership_id))""")
     c.execute("CREATE INDEX IF NOT EXISTS memberships_customer_recent ON membership_applications(customer_id,applied_at)")
     for key, name in PLAN_DEFAULTS:
-        c.execute("INSERT OR IGNORE INTO membership_plans(plan_key,name,price_paise,duration_days,benefits_json,is_active) VALUES(?,?,?,NULL,'[]',1)",
-                  (key,name,0 if key == "basic" else None))
+        discount={"basic":0,"plus":5,"premium":10}[key]
+        c.execute("INSERT OR IGNORE INTO membership_plans(plan_key,name,price_paise,duration_days,benefits_json,is_active,product_discount_percent) VALUES(?,?,?,NULL,'[]',1,?)",
+                  (key,name,0 if key == "basic" else None,discount))
 
 
 def _plans(c):
-    rows=c.execute("SELECT plan_key,name,price_paise,duration_days,benefits_json,is_active,updated_at FROM membership_plans ORDER BY CASE plan_key WHEN 'basic' THEN 1 WHEN 'plus' THEN 2 WHEN 'premium' THEN 3 ELSE 4 END,name").rows
+    rows=c.execute("SELECT plan_key,name,price_paise,duration_days,benefits_json,is_active,updated_at,product_discount_percent FROM membership_plans ORDER BY CASE plan_key WHEN 'basic' THEN 1 WHEN 'plus' THEN 2 WHEN 'premium' THEN 3 ELSE 4 END,name").rows
     result=[]
     for r in rows:
         try: benefits=json.loads(r[4] or "[]")
         except (TypeError,ValueError): benefits=[]
-        result.append({"plan_key":r[0],"name":r[1],"price_paise":r[2],"duration_days":r[3],"benefits":benefits,"is_active":bool(r[5]),"updated_at":r[6]})
+        result.append({"plan_key":r[0],"name":r[1],"price_paise":r[2],"duration_days":r[3],"benefits":benefits,"is_active":bool(r[5]),"updated_at":r[6],"product_discount_percent":int(r[7] or 0)})
     return result
+
+
+def product_discount_percent(c, customer_id):
+    """Return the rate for the customer's current approved, unexpired membership."""
+    now=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00","Z")
+    sql="""SELECT p.product_discount_percent,p.name
+        FROM membership_applications a JOIN membership_plans p ON p.plan_key=a.plan_key
+        WHERE a.customer_id=? AND a.status='approved' AND (a.expires_at IS NULL OR a.expires_at>?)
+        ORDER BY a.activated_at DESC,a.applied_at DESC LIMIT 1"""
+    try:
+        rows=c.execute(sql,(customer_id,now)).rows
+    except Exception as exc:
+        # Initialize the membership schema only for a new database or first upgrade.
+        message=str(exc).lower()
+        if "no such table" not in message and "no such column" not in message:
+            raise
+        ensure_tables(c)
+        rows=c.execute(sql,(customer_id,now)).rows
+    return (max(0,min(100,int(rows[0][0] or 0))),rows[0][1]) if rows else (0,None)
 
 
 def _expire_customer(c, customer_id):
@@ -132,4 +157,3 @@ def customer_applications():
         keys=("membership_id","plan_key","amount_paise","duration_days","status","applied_at","reviewed_at","activated_at","expires_at","rejection_reason")
         return jsonify(success=True,result=[dict(zip(keys,r)) for r in data])
     except Exception:return jsonify(success=False,error="Could not load your applications"),503
-

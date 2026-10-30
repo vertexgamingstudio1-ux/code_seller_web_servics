@@ -57,12 +57,25 @@ def active_campaign(client, today=None):
     active = [c for c in payload["campaigns"] if c["enabled"] and payload["enabled"] and c["campaign_start_date"] and c["campaign_end_date"] and date.fromisoformat(c["campaign_start_date"]) <= today <= date.fromisoformat(c["campaign_end_date"])]
     return active[0] if active else None
 
-def apply_campaign(product, campaign):
+def apply_campaign(product, campaign, membership_discount_percent=0):
     result = dict(product)
     original = int(result.get("price") or 0)
+    eligible = original > 0 and not result.get("is_free", False)
+    festival_percent = 30 if campaign and eligible else 0
+    try:
+        membership_percent = max(0, min(100, int(membership_discount_percent or 0))) if eligible else 0
+    except (TypeError, ValueError):
+        membership_percent = 0
+    # Discounts are sequential: festival first, then the active membership rate.
+    festival_price = (original * (100 - festival_percent) + 50) // 100
+    final_price = (festival_price * (100 - membership_percent) + 50) // 100
     result["original_price"] = original
-    result["festival_discount_percent"] = 30 if campaign and original > 0 else 0
-    result["festival_campaign"] = campaign["name"] if campaign and original > 0 else None
-    result["price"] = (original * 70 + 50) // 100 if campaign and original > 0 else original
+    result["festival_discount_percent"] = festival_percent
+    result["membership_discount_percent"] = membership_percent
+    result["festival_discount_amount"] = original - festival_price
+    result["membership_discount_amount"] = festival_price - final_price
+    result["discount_amount"] = original - final_price
+    result["festival_campaign"] = campaign["name"] if festival_percent else None
+    result["price"] = final_price
     return result
 

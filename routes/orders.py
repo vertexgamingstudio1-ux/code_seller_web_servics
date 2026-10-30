@@ -1,8 +1,19 @@
 ﻿from flask import Blueprint, jsonify, request
 from middleware.auth import require_customer
-from services.order_service import quote, create_order, create_cash_order, start_payment, verify_checkout, handle_webhook, customer_orders, payment_options
+from auth.jwt import verify_token
+from services.order_service import quote, create_order, create_cash_order, start_payment, verify_checkout, handle_webhook, customer_orders, payment_options, order_total
 
 orders_bp = Blueprint("orders", __name__)
+
+def _optional_customer_id():
+    header=request.headers.get("Authorization","")
+    if not header.startswith("Bearer "):
+        return None
+    try:
+        claims=verify_token(header[7:].strip())
+        return claims.get("sub") if claims.get("role")=="customer" else None
+    except Exception:
+        return None
 
 @orders_bp.post("/<order_id>/receipt")
 @require_customer
@@ -42,7 +53,7 @@ def get_payment_options():
 @orders_bp.post("/quote")
 def order_quote():
     try:
-        return jsonify(success=True, result=quote((request.get_json(silent=True) or {}).get("items")))
+        return jsonify(success=True, result=quote((request.get_json(silent=True) or {}).get("items"),_optional_customer_id()))
     except ValueError as exc:
         return jsonify(success=False, error=str(exc)), 400
     except Exception:
@@ -76,13 +87,12 @@ def order_create():
 def cash_order_create():
     try:
         items = (request.get_json(silent=True) or {}).get("items")
-        priced = quote(items)
         order_id = create_cash_order(request.auth["sub"], items)
         return jsonify(success=True, result={
             "order_id": order_id,
             "status": "pending_cash",
-            "total": priced["total"],
-            "currency": priced["currency"]
+            "total": order_total(order_id,request.auth["sub"]),
+            "currency": "INR"
         }), 201
     except ValueError as exc:
         return jsonify(success=False, error=str(exc)), 400
@@ -95,13 +105,12 @@ def upi_order_create():
     """Create a manually verified UPI order using the existing approval lifecycle."""
     try:
         items = (request.get_json(silent=True) or {}).get("items")
-        priced = quote(items)
         order_id = create_cash_order(request.auth["sub"], items)
         return jsonify(success=True, result={
             "order_id": order_id,
             "status": "pending_cash",
-            "total": priced["total"],
-            "currency": priced["currency"],
+            "total": order_total(order_id,request.auth["sub"]),
+            "currency": "INR",
             "payment_method": "upi"
         }), 201
     except ValueError as exc:

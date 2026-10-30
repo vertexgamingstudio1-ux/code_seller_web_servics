@@ -14,7 +14,7 @@ def _product(row):
     return result
 class ProductService:
     @staticmethod
-    def list_products():
+    def list_products(user_id=None):
         with get_connection() as client:
             result = client.execute(
                 """SELECT id, name, slug, description, category, price,
@@ -25,12 +25,15 @@ class ProductService:
                    ORDER BY created_at DESC"""
             )
         from services.festival_service import active_campaign, apply_campaign
+        membership_percent, membership_plan_name = _membership_discount(user_id)
         with get_connection() as client:
             campaign = active_campaign(client)
-        products = [apply_campaign(_product(row), campaign) for row in result.rows]
+        products = [apply_campaign(_product(row), campaign, membership_percent) for row in result.rows]
+        for product in products:
+            product["membership_plan_name"] = membership_plan_name if membership_percent else None
         return {"products": products, "count": len(products), "festival_campaign": campaign}
     @staticmethod
-    def get_product(product_id):
+    def get_product(product_id, user_id=None, membership_percent=None):
         with get_connection() as client:
             result = client.execute(
                 """SELECT id, name, slug, description, category, price,
@@ -44,9 +47,15 @@ class ProductService:
         if not result.rows:
             return None
         from services.festival_service import active_campaign, apply_campaign
+        if membership_percent is None:
+            membership_percent, membership_plan_name = _membership_discount(user_id)
+        else:
+            membership_plan_name = None
         with get_connection() as client:
             campaign = active_campaign(client)
-        return apply_campaign(_product(result.rows[0]), campaign)
+        product=apply_campaign(_product(result.rows[0]), campaign, membership_percent)
+        product["membership_plan_name"] = membership_plan_name if membership_percent else None
+        return product
     @staticmethod
     def create_product(data):
         import secrets
@@ -104,3 +113,15 @@ def _new_product_id(client):
         if not client.execute("SELECT 1 FROM products WHERE id=?", (candidate,)).rows:
             return candidate
     raise RuntimeError("Could not allocate a unique product ID")
+
+
+def _membership_discount(user_id):
+    if not user_id:
+        return 0,None
+    from routes.memberships import product_discount_percent
+    with get_connection() as client:
+        return product_discount_percent(client, user_id)
+
+
+def _membership_discount_percent(user_id):
+    return _membership_discount(user_id)[0]

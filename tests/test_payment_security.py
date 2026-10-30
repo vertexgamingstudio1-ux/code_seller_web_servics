@@ -13,6 +13,7 @@ import routes.downloads as downloads
 import routes.admin as admin_routes
 import services.customer_auth_service as customer_auth
 import services.order_service as service
+import services.product_service as product_service
 from routes.auth import bp as auth_bp
 from routes.orders import orders_bp
 
@@ -53,6 +54,8 @@ class PaymentSecurityTests(unittest.TestCase):
         self.env.start()
         self.connection_patch = patch.object(service, "get_connection", self.connection_context)
         self.connection_patch.start()
+        self.product_connection_patch = patch.object(product_service, "get_connection", self.connection_context)
+        self.product_connection_patch.start()
         self.customer_auth_connection_patch = patch.object(customer_auth, "get_connection", self.connection_context)
         self.customer_auth_connection_patch.start()
         self.download_connection_patch = patch.object(downloads, "get_connection", self.connection_context)
@@ -76,6 +79,7 @@ class PaymentSecurityTests(unittest.TestCase):
     def tearDown(self):
         self.token_patch.stop()
         self.download_connection_patch.stop()
+        self.product_connection_patch.stop()
         self.admin_connection_patch.stop()
         self.customer_auth_connection_patch.stop()
         self.connection_patch.stop()
@@ -176,7 +180,7 @@ class PaymentSecurityTests(unittest.TestCase):
         self.assertEqual(failure.status_code,401)
 
     def test_order_creation_uses_server_price_and_authenticated_customer(self):
-        product={"id":"ABC123","name":"Test Product","price":1200,"currency":"INR","is_free":False,"is_published":True}
+        product={"id":"ABC123","name":"Test Product","price":1200,"original_price":1200,"festival_discount_percent":0,"membership_discount_percent":0,"festival_discount_amount":0,"membership_discount_amount":0,"discount_amount":0,"currency":"INR","is_free":False,"is_published":True}
         with patch.object(service.ProductService,"get_product",return_value=product):
             response=self.client_http.post("/api/orders/",headers={"Authorization":"Bearer customer-token"},json={"items":[{"id":"ABC123","quantity":2,"unit_price":1}]})
         self.assertEqual(response.status_code,201,response.get_json())
@@ -187,7 +191,7 @@ class PaymentSecurityTests(unittest.TestCase):
         self.assertEqual(item,("ABC123",2,1200,2400))
 
     def create_cash_order(self):
-        product={"id":"ABC123","name":"Test Product","price":1200,"currency":"INR","is_free":False,"is_published":True}
+        product={"id":"ABC123","name":"Test Product","price":1200,"original_price":1200,"festival_discount_percent":0,"membership_discount_percent":0,"festival_discount_amount":0,"membership_discount_amount":0,"discount_amount":0,"currency":"INR","is_free":False,"is_published":True}
         with patch.object(service.ProductService,"get_product",return_value=product):
             response=self.client_http.post("/api/orders/cash",headers={"Authorization":"Bearer customer-token"},json={"items":[{"id":"ABC123","quantity":1,"unit_price":1}]})
         self.assertEqual(response.status_code,201,response.get_json())
@@ -200,7 +204,7 @@ class PaymentSecurityTests(unittest.TestCase):
         self.assertEqual(next(row for row in own_order if row["id"]==order_id)["status"],"pending_cash")
 
     def test_upi_order_uses_server_price_and_existing_admin_review_status(self):
-        product={"id":"ABC123","name":"Test Product","price":1200,"currency":"INR","is_free":False,"is_published":True}
+        product={"id":"ABC123","name":"Test Product","price":1200,"original_price":1200,"festival_discount_percent":0,"membership_discount_percent":0,"festival_discount_amount":0,"membership_discount_amount":0,"discount_amount":0,"currency":"INR","is_free":False,"is_published":True}
         with patch.object(service.ProductService,"get_product",return_value=product):
             response=self.client_http.post("/api/orders/upi",headers={"Authorization":"Bearer customer-token"},json={"items":[{"id":"ABC123","quantity":2,"unit_price":1}]})
         self.assertEqual(response.status_code,201,response.get_json())

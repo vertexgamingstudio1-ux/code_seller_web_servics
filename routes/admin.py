@@ -530,7 +530,9 @@ def search_orders():
     if not query or len(query) > 128:
         return fail("Enter an Order ID or Customer ID", 400)
     try:
+        from services.order_service import ensure_order_pricing_schema
         with get_connection() as client:
+            ensure_order_pricing_schema(client)
             client.execute("""CREATE TABLE IF NOT EXISTS cash_payment_receipts (
                 order_id TEXT PRIMARY KEY,customer_id TEXT NOT NULL,transaction_reference TEXT NOT NULL,
                 screenshot_key TEXT NOT NULL,uploaded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)""")
@@ -542,9 +544,11 @@ def search_orders():
             "subtotal","total","currency","created_at","updated_at"))
         result=[]
         for order in found:
-            order["items"] = rows("""SELECT i.product_id,p.name,i.quantity,i.unit_price,i.total_price
+            order["items"] = rows("""SELECT i.product_id,p.name,i.quantity,i.unit_price,i.total_price,
+                    i.original_unit_price,i.festival_discount_percent,i.membership_discount_percent,
+                    i.festival_discount_amount,i.membership_discount_amount
                 FROM order_items i LEFT JOIN products p ON p.id=i.product_id WHERE i.order_id=?""",
-                (order["id"],),("product_id","name","quantity","unit_price","total_price"))
+                (order["id"],),("product_id","name","quantity","unit_price","total_price","original_unit_price","festival_discount_percent","membership_discount_percent","festival_discount_amount","membership_discount_amount"))
             order["payments"] = rows("""SELECT provider,status,amount,currency,provider_payment_id,paid_at,created_at
                 FROM payments WHERE order_id=? ORDER BY created_at""",(order["id"],),
                 ("provider","status","amount","currency","transaction_reference","paid_at","created_at"))

@@ -21,12 +21,12 @@ def slugify(value):
 @require_admin
 def get_plans():
     try:
-        with get_connection() as c:ensure_memberships(c);data=c.execute("SELECT plan_key,name,price_paise,duration_days,benefits_json,is_active,updated_at FROM membership_plans ORDER BY plan_key").rows
+        with get_connection() as c:ensure_memberships(c);data=c.execute("SELECT plan_key,name,price_paise,duration_days,benefits_json,is_active,updated_at,product_discount_percent FROM membership_plans ORDER BY plan_key").rows
         result=[]
         for r in data:
             try:b=json.loads(r[4] or "[]")
             except ValueError:b=[]
-            result.append({"plan_key":r[0],"name":r[1],"price_paise":r[2],"duration_days":r[3],"benefits":b,"is_active":bool(r[5]),"updated_at":r[6]})
+            result.append({"plan_key":r[0],"name":r[1],"price_paise":r[2],"duration_days":r[3],"benefits":b,"is_active":bool(r[5]),"updated_at":r[6],"product_discount_percent":int(r[7] or 0)})
         return jsonify(success=True,result=result)
     except Exception:return fail("Could not load membership plans",503)
 
@@ -37,6 +37,9 @@ def save_plan(plan_key):
     expected_name={"basic":"Basic","plus":"Plus","premium":"Premium"}[plan_key]
     data=request.get_json(silent=True) or {};name=str(data.get("name",expected_name)).strip();benefits=data.get("benefits",[])
     if name!=expected_name or not isinstance(benefits,list) or len(benefits)>30 or any(not isinstance(x,str) or len(x)>240 for x in benefits):return fail("Keep the agreed plan name and provide a list of benefits",400)
+    try:discount=int(data.get("product_discount_percent",{"basic":0,"plus":5,"premium":10}[plan_key]))
+    except (TypeError,ValueError):return fail("Product discount must be a whole percentage from 0 to 100",400)
+    if discount<0 or discount>100:return fail("Product discount must be a whole percentage from 0 to 100",400)
     price=data.get("price_paise");duration=data.get("duration_days")
     try:
         if plan_key=="basic":price=0;duration=None
@@ -47,10 +50,10 @@ def save_plan(plan_key):
     try:
         with get_connection() as c:
             ensure_memberships(c)
-            c.execute("UPDATE membership_plans SET name=?,price_paise=?,duration_days=?,benefits_json=?,is_active=?,updated_at=CURRENT_TIMESTAMP WHERE plan_key=?",
-                (name,price,duration,json.dumps(benefits,ensure_ascii=False),int(bool(data.get("is_active",True))),plan_key))
-            result=c.execute("SELECT plan_key,name,price_paise,duration_days,benefits_json,is_active,updated_at FROM membership_plans WHERE plan_key=?",(plan_key,)).rows[0]
-        return jsonify(success=True,result={"plan_key":result[0],"name":result[1],"price_paise":result[2],"duration_days":result[3],"benefits":json.loads(result[4]),"is_active":bool(result[5]),"updated_at":result[6]})
+            c.execute("UPDATE membership_plans SET name=?,price_paise=?,duration_days=?,benefits_json=?,is_active=?,product_discount_percent=?,updated_at=CURRENT_TIMESTAMP WHERE plan_key=?",
+                (name,price,duration,json.dumps(benefits,ensure_ascii=False),int(bool(data.get("is_active",True))),discount,plan_key))
+            result=c.execute("SELECT plan_key,name,price_paise,duration_days,benefits_json,is_active,updated_at,product_discount_percent FROM membership_plans WHERE plan_key=?",(plan_key,)).rows[0]
+        return jsonify(success=True,result={"plan_key":result[0],"name":result[1],"price_paise":result[2],"duration_days":result[3],"benefits":json.loads(result[4]),"is_active":bool(result[5]),"updated_at":result[6],"product_discount_percent":int(result[7] or 0)})
     except Exception:return fail("Could not save membership plan",503)
 
 @bp.get("/membership-applications")

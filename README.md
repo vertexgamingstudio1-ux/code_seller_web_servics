@@ -21,3 +21,7 @@ When test configuration is absent, order records can still be created and remain
 ## Identifier and history behavior
 
 New customer IDs use `CS-` plus eight unambiguous uppercase letters/digits. New product IDs are six uppercase letters/digits. Existing product IDs, order rows, and historical references are retained. New order items snapshot the server-calculated unit price and quantity.
+
+## Product discount calculation
+
+Basic, Plus, and Premium membership product discounts are 0%, 5%, and 10%. A membership discount applies only while the customer's membership is approved and unexpired. Free products are not discounted. During an eligible active festival campaign, paid products receive the festival discount first (currently 30%); the applicable membership percentage is then applied to that reduced price. Each step rounds to the nearest whole price unit using `(amount * (100 - percent) + 50) // 100`. For example, a 999 price becomes 699 after the festival discount, then 664 for an active Plus member. Quotes and order creation use the backend calculation; order creation stores the final unit price and both discount amounts for later order summaries.

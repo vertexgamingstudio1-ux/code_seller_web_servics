@@ -21,6 +21,7 @@ import routes.memberships as memberships
 import routes.management as management
 import routes.campaigns as campaigns
 import services.product_service as product_service
+import services.order_service as order_service
 import services.object_storage as object_storage
 from werkzeug.datastructures import FileStorage
 import db
@@ -75,11 +76,11 @@ class Database:
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
         self.client.execute("""CREATE TABLE product_versions (
             id TEXT PRIMARY KEY,product_id TEXT,version TEXT,changelog TEXT,
-            single_file_path TEXT,package_file_path TEXT,is_active INTEGER)""")
+            single_file_path TEXT,package_file_path TEXT,is_active INTEGER,created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
         self.client.execute("INSERT INTO users(id,email,role,display_name) VALUES ('customer-1','customer@example.com','customer','Customer One'),('admin-1','admin@example.com','admin','Admin One')")
         self.client.execute("INSERT INTO products(id,name,slug,description,category,price,currency,is_free,is_published) VALUES ('product-1','Test Pack','test-pack','Test description','Tools',999,'INR',0,1)")
         self.client.execute("CREATE TABLE orders (id TEXT PRIMARY KEY,user_id TEXT,status TEXT,subtotal INTEGER,total INTEGER,currency TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP,updated_at TEXT DEFAULT CURRENT_TIMESTAMP)")
-        self.client.execute("CREATE TABLE order_items (id TEXT PRIMARY KEY,order_id TEXT,product_id TEXT,quantity INTEGER,unit_price INTEGER,total_price INTEGER)")
+        self.client.execute("CREATE TABLE order_items (id TEXT PRIMARY KEY,order_id TEXT,product_id TEXT,product_version_id TEXT,quantity INTEGER,unit_price INTEGER,total_price INTEGER)")
         self.client.execute("CREATE TABLE payments (id TEXT PRIMARY KEY,order_id TEXT,provider TEXT,status TEXT,amount INTEGER,currency TEXT,provider_payment_id TEXT,paid_at TEXT,created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
         self.client.execute("CREATE TABLE cash_approvals (order_id TEXT PRIMARY KEY,approved_by TEXT,approved_at TEXT)")
 
@@ -110,6 +111,10 @@ class CodeSellerFeatureTests(unittest.TestCase):
         self.patches = [
             patch.object(auth, "verify_token", side_effect=lambda token: self.tokens[token]),
             patch.object(product_service, "get_connection", self.database.connection_context),
+            patch.object(product_service, "_membership_discount", side_effect=lambda user_id: (memberships.product_discount_percent(self.database.client,user_id) if user_id else (0,None))),
+            patch.object(order_service, "get_connection", self.database.connection_context),
+            patch.object(products, "verify_token", side_effect=lambda token: self.tokens[token]),
+            patch.object(orders, "verify_token", side_effect=lambda token: self.tokens[token]),
             patch.object(admin, "get_connection", self.database.connection_context),
             patch.object(customer, "get_connection", self.database.connection_context),
             patch.object(community, "get_connection", self.database.connection_context),
@@ -154,6 +159,56 @@ class CodeSellerFeatureTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/products/product-1").get_json()["result"]["price"],699)
         self.save_schedule(self.campaign_payload(start,end,scheduler=False,overlap=True))
         self.assertEqual(self.client.get("/api/products/product-1").get_json()["result"]["price"],999)
+
+    def test_member_festival_pricing_matches_catalog_quote_and_order(self):
+        plans=self.client.get("/api/memberships/plans").get_json()["result"]
+        self.assertEqual([(p["plan_key"],p["product_discount_percent"]) for p in plans],[('basic',0),('plus',5),('premium',10)])
+        self.assertEqual(self.client.get("/api/products/product-1").get_json()["result"]["price"],999)
+        approved=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=30)).isoformat().replace("+00:00","Z")
+        self.database.client.execute("INSERT INTO membership_applications(membership_id,customer_id,plan_key,status,activated_at,expires_at) VALUES('CSM-PLUS','customer-1','plus','approved',?,?)",(datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00","Z"),approved))
+        member_product=self.client.get("/api/products/product-1",headers=self.bearer()).get_json()["result"]
+        self.assertEqual((member_product["original_price"],member_product["price"],member_product["membership_discount_percent"]),(999,949,5))
+        start=(self.today + datetime.timedelta(days=1)).isoformat();end=(self.today + datetime.timedelta(days=3)).isoformat()
+        self.save_schedule(self.campaign_payload(start,end))
+        nonmember=self.client.get("/api/products/product-1").get_json()["result"]
+        combined=self.client.get("/api/products/product-1",headers=self.bearer()).get_json()["result"]
+        self.assertEqual((nonmember["price"],nonmember["festival_discount_percent"],nonmember["membership_discount_percent"]),(699,30,0))
+        self.assertEqual((combined["price"],combined["festival_discount_percent"],combined["membership_discount_percent"]),(664,30,5))
+        quoted=self.client.post("/api/orders/quote",headers=self.bearer(),json={"items":[{"id":"product-1","quantity":2}]}).get_json()["result"]
+        self.assertEqual((quoted["subtotal"],quoted["discount_total"],quoted["total"]),(1998,670,1328))
+        self.assertEqual((quoted["items"][0]["festival_discount_amount"],quoted["items"][0]["membership_discount_amount"]),(600,70))
+        created=self.client.post("/api/orders/upi",headers=self.bearer(),json={"items":[{"id":"product-1","quantity":2}]})
+        self.assertEqual(created.status_code,201,created.get_json())
+        order_id=created.get_json()["result"]["order_id"]
+        self.assertEqual(created.get_json()["result"]["total"],quoted["total"])
+        self.assertEqual(self.database.client.execute("SELECT subtotal,total FROM orders WHERE id=?",(order_id,)).rows[0],(1998,1328))
+        item=self.database.client.execute("SELECT unit_price,total_price,original_unit_price,festival_discount_percent,membership_discount_percent FROM order_items WHERE order_id=?",(order_id,)).rows[0]
+        self.assertEqual(item,(664,1328,999,30,5))
+        admin_order=self.client.get("/api/admin/orders/search?q="+order_id,headers=self.bearer("admin")).get_json()["result"][0]
+        self.assertEqual((admin_order["total"],admin_order["items"][0]["festival_discount_amount"],admin_order["items"][0]["membership_discount_amount"]),(1328,300,35))
+        self.database.client.execute("INSERT INTO products(id,name,slug,description,category,price,currency,is_free,is_published) VALUES('free-1','Free Pack','free-pack','Free product','Tools',0,'INR',1,1)")
+        free=self.client.get("/api/products/free-1",headers=self.bearer()).get_json()["result"]
+        self.assertEqual((free["price"],free["festival_discount_percent"],free["membership_discount_percent"]),(0,0,0))
+
+    def test_pending_and_expired_memberships_do_not_receive_member_discount(self):
+        self.client.get("/api/memberships/plans")
+        self.database.client.execute("INSERT INTO membership_applications(membership_id,customer_id,plan_key,status) VALUES('CSM-PENDING','customer-1','premium','pending')")
+        pending=self.client.get("/api/products/product-1",headers=self.bearer()).get_json()["result"]
+        self.assertEqual((pending["price"],pending["membership_discount_percent"]),(999,0))
+        self.database.client.execute("UPDATE membership_applications SET status='approved',activated_at='2020-01-01T00:00:00Z',expires_at='2000-01-01T00:00:00Z' WHERE membership_id='CSM-PENDING'")
+        expired=self.client.get("/api/products/product-1",headers=self.bearer()).get_json()["result"]
+        self.client.get("/api/memberships/current",headers=self.bearer())
+        status=self.database.client.execute("SELECT status FROM membership_applications WHERE membership_id='CSM-PENDING'").rows[0][0]
+        self.assertEqual((expired["price"],expired["membership_discount_percent"],status),(999,0,"expired"))
+
+    def test_membership_rate_migration_keeps_existing_plan_settings(self):
+        self.database.client.execute("CREATE TABLE membership_plans(plan_key TEXT PRIMARY KEY,name TEXT NOT NULL,price_paise INTEGER,duration_days INTEGER,benefits_json TEXT NOT NULL DEFAULT '[]',is_active INTEGER NOT NULL DEFAULT 1,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+        self.database.client.execute("INSERT INTO membership_plans(plan_key,name,price_paise,duration_days,benefits_json,is_active) VALUES('plus','Plus',50000,30,'[\"Priority support\"]',1)")
+        memberships.ensure_tables(self.database.client)
+        plus=self.database.client.execute("SELECT price_paise,duration_days,benefits_json,product_discount_percent FROM membership_plans WHERE plan_key='plus'").rows[0]
+        premium=self.database.client.execute("SELECT product_discount_percent FROM membership_plans WHERE plan_key='premium'").rows[0][0]
+        self.assertEqual(plus,(50000,30,'["Priority support"]',5))
+        self.assertEqual(premium,10)
         past_start=(self.today-datetime.timedelta(days=3)).isoformat()
         past_end=(self.today-datetime.timedelta(days=2)).isoformat()
         self.save_schedule(self.campaign_payload(past_start,past_end,overlap=False))
@@ -197,6 +252,7 @@ class CodeSellerFeatureTests(unittest.TestCase):
         self.assertEqual(response.status_code,200,response.get_json())
         self.assertEqual(response.get_json()["result"][0]["id"],"CSO-ABC123")
         self.assertEqual(len(response.get_json()["result"][0]["items"]),1)
+        self.assertEqual(response.get_json()["result"][0]["items"][0]["original_unit_price"],999)
         self.assertEqual(self.client.get("/api/admin/orders/search?q=CSO-ABC123",headers=self.bearer()).status_code,403)
 
     def test_private_order_receipt_upload_and_admin_only_access(self):
