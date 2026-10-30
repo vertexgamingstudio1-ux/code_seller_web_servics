@@ -10,7 +10,7 @@ from middleware.auth import require_customer
 from services.object_storage import StorageNotConfigured, upload, private_url
 
 bp = Blueprint("memberships", __name__)
-PLAN_DEFAULTS = (("basic", "Basic", 0), ("plus", "Plus", 19900), ("premium", "Premium", 39900))
+PLAN_DEFAULTS = (("basic", "Basic", 0, None), ("plus", "Plus", 19900, 30), ("premium", "Premium", 39900, 30))
 
 
 def ensure_tables(c):
@@ -36,11 +36,13 @@ def ensure_tables(c):
         action TEXT NOT NULL, note TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY(membership_id) REFERENCES membership_applications(membership_id))""")
     c.execute("CREATE INDEX IF NOT EXISTS memberships_customer_recent ON membership_applications(customer_id,applied_at)")
-    for key, name, price_paise in PLAN_DEFAULTS:
+    for key, name, price_paise, duration_days in PLAN_DEFAULTS:
         discount={"basic":0,"plus":5,"premium":10}[key]
-        c.execute("INSERT OR IGNORE INTO membership_plans(plan_key,name,price_paise,duration_days,benefits_json,is_active,product_discount_percent) VALUES(?,?,?,NULL,'[]',1,?)",
-                  (key,name,price_paise,discount))
+        c.execute("INSERT OR IGNORE INTO membership_plans(plan_key,name,price_paise,duration_days,benefits_json,is_active,product_discount_percent) VALUES(?,?,?,?,'[]',1,?)",
+                  (key,name,price_paise,duration_days,discount))
         c.execute("UPDATE membership_plans SET price_paise=? WHERE plan_key=? AND price_paise IS NULL",(price_paise,key))
+        if duration_days:
+            c.execute("UPDATE membership_plans SET duration_days=? WHERE plan_key=? AND duration_days IS NULL",(duration_days,key))
 
 
 def _plans(c):
@@ -127,9 +129,10 @@ def apply_membership():
         if plan_key!="basic":
             transaction_reference=str(request.form.get("transaction_reference","")).strip()
             image=request.files.get("screenshot")
-            if not transaction_reference or len(transaction_reference)>160 or not image:
-                return jsonify(success=False,error="Paid applications need a transaction reference and payment screenshot"),400
-            screenshot_key=upload(image,prefix="membership-receipts",private=True,max_bytes=5*1024*1024)
+            if not transaction_reference or len(transaction_reference)>160:
+                return jsonify(success=False,error="Paid membership checkout needs a transaction reference"),400
+            if image:
+                screenshot_key=upload(image,prefix="membership-receipts",private=True,max_bytes=5*1024*1024)
         membership_id="CSM-"+uuid.uuid4().hex[:12].upper()
         now=datetime.now(timezone.utc); status="approved" if plan_key=="basic" else "pending"
         start=now.isoformat(timespec="seconds").replace("+00:00","Z") if status=="approved" else None
@@ -142,7 +145,7 @@ def apply_membership():
             c.execute("INSERT INTO membership_events(id,membership_id,actor_id,action,note) VALUES(?,?,?,?,?)",
                 (str(uuid.uuid4()),membership_id,user,"applied","Customer submitted application"))
             if status=="approved":c.execute("INSERT INTO membership_events(id,membership_id,actor_id,action,note) VALUES(?,?,?,?,?)",(str(uuid.uuid4()),membership_id,user,"approved","Free Basic plan activated"))
-        return jsonify(success=True,result={"membership_id":membership_id,"plan_key":plan_key,"status":status,"activated_at":start,"expires_at":expiry}),201
+        return jsonify(success=True,result={"membership_id":membership_id,"plan_key":plan_key,"amount_paise":int(plan["price_paise"] or 0),"status":status,"activated_at":start,"expires_at":expiry}),201
     except ValueError as exc:return jsonify(success=False,error=str(exc)),400
     except StorageNotConfigured as exc:return jsonify(success=False,error=str(exc)),503
     except Exception:return jsonify(success=False,error="Could not submit membership application"),503

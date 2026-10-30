@@ -378,11 +378,12 @@ class CodeSellerFeatureTests(unittest.TestCase):
         self.assertEqual(next(p for p in plans if p["plan_key"]=="basic")["price_paise"],0)
         self.assertEqual(next(p for p in plans if p["plan_key"]=="plus")["price_paise"],19900)
         self.assertEqual(next(p for p in plans if p["plan_key"]=="premium")["price_paise"],39900)
+        self.assertEqual(next(p for p in plans if p["plan_key"]=="plus")["duration_days"],30)
+        self.assertEqual(next(p for p in plans if p["plan_key"]=="premium")["duration_days"],30)
         config=self.client.put("/api/admin/membership-plans/plus",headers=self.bearer("admin"),json={"name":"Plus","price_paise":50000,"duration_days":30,"benefits":["Priority support"]})
         self.assertEqual(config.status_code,200,config.get_json())
         def apply_paid():
-            with patch.object(memberships,"upload",return_value="private/membership.png"):
-                return self.client.post("/api/memberships/applications",headers=self.bearer(),data={"plan_key":"plus","transaction_reference":"UTR-123","screenshot":(io.BytesIO(b"receipt"),"receipt.png","image/png")},content_type="multipart/form-data")
+            return self.client.post("/api/memberships/applications",headers=self.bearer(),data={"plan_key":"plus","transaction_reference":"UTR-123"},content_type="multipart/form-data")
         res=apply_paid();self.assertEqual(res.status_code,201,res.get_json())
         first=res.get_json()["result"]["membership_id"]
         self.assertTrue(first.startswith("CSM-"))
