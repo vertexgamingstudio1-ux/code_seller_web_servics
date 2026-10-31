@@ -7,7 +7,6 @@ from flask import Blueprint, jsonify, request
 
 from db import get_connection
 from middleware.auth import require_customer
-from services.object_storage import StorageNotConfigured, upload, private_url
 
 bp = Blueprint("memberships", __name__)
 PLAN_DEFAULTS = (("basic", "Basic", 0, None), ("plus", "Plus", 19900, 30), ("premium", "Premium", 39900, 30))
@@ -115,7 +114,8 @@ def current_membership():
 @require_customer
 def apply_membership():
     user=request.auth["sub"]
-    plan_key=str(request.form.get("plan_key") or (request.get_json(silent=True) or {}).get("plan_key") or "").strip().lower()
+    payload=request.get_json(silent=True) or {}
+    plan_key=str(payload.get("plan_key") or "").strip().lower()
     try:
         with get_connection() as c:
             ensure_tables(c)
@@ -123,17 +123,11 @@ def apply_membership():
             if not plan:return jsonify(success=False,error="Choose an active membership plan"),400
             pending=c.execute("SELECT membership_id FROM membership_applications WHERE customer_id=? AND status='pending' LIMIT 1",(user,)).rows
             if pending:return jsonify(success=False,error="You already have a membership application under review",membership_id=pending[0][0]),409
-            if plan_key!="basic" and (plan["price_paise"] is None or plan["duration_days"] is None):
+            if plan_key!="basic" and (plan["price_paise"] is None or int(plan["price_paise"])<=0 or plan["duration_days"] is None or int(plan["duration_days"])<=0):
                 return jsonify(success=False,error="This plan's price or duration has not been configured yet"),409
-        screenshot_key=None; transaction_reference=None
-        if plan_key!="basic":
-            transaction_reference=str(request.form.get("transaction_reference","")).strip()
-            image=request.files.get("screenshot")
-            if not transaction_reference or len(transaction_reference)>160:
-                return jsonify(success=False,error="Paid membership checkout needs a transaction reference"),400
-            if image:
-                screenshot_key=upload(image,prefix="membership-receipts",private=True,max_bytes=5*1024*1024)
-        membership_id="CSM-"+uuid.uuid4().hex[:12].upper()
+        # Receipts are emailed or sent by SMS and reviewed by an admin outside the app.
+        # Keep legacy columns nullable for old records; this endpoint accepts no receipt.
+        membership_id="CSM-"+uuid.uuid4().hex.upper()
         now=datetime.now(timezone.utc); status="approved" if plan_key=="basic" else "pending"
         start=now.isoformat(timespec="seconds").replace("+00:00","Z") if status=="approved" else None
         expiry=(now+timedelta(days=plan["duration_days"])).isoformat(timespec="seconds").replace("+00:00","Z") if status=="approved" and plan["duration_days"] else None
@@ -141,13 +135,12 @@ def apply_membership():
             ensure_tables(c)
             c.execute("""INSERT INTO membership_applications(membership_id,customer_id,plan_key,amount_paise,duration_days,
                 transaction_reference,screenshot_key,status,activated_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                (membership_id,user,plan_key,int(plan["price_paise"] or 0),plan["duration_days"],transaction_reference,screenshot_key,status,start,expiry))
+                (membership_id,user,plan_key,int(plan["price_paise"] or 0),plan["duration_days"],None,None,status,start,expiry))
             c.execute("INSERT INTO membership_events(id,membership_id,actor_id,action,note) VALUES(?,?,?,?,?)",
                 (str(uuid.uuid4()),membership_id,user,"applied","Customer submitted application"))
             if status=="approved":c.execute("INSERT INTO membership_events(id,membership_id,actor_id,action,note) VALUES(?,?,?,?,?)",(str(uuid.uuid4()),membership_id,user,"approved","Free Basic plan activated"))
-        return jsonify(success=True,result={"membership_id":membership_id,"plan_key":plan_key,"amount_paise":int(plan["price_paise"] or 0),"status":status,"activated_at":start,"expires_at":expiry}),201
+        return jsonify(success=True,result={"membership_id":membership_id,"plan_key":plan_key,"amount_paise":int(plan["price_paise"] or 0),"duration_days":plan["duration_days"],"status":status,"payment_status":"not_required" if plan_key=="basic" else "pending_verification","activated_at":start,"expires_at":expiry}),201
     except ValueError as exc:return jsonify(success=False,error=str(exc)),400
-    except StorageNotConfigured as exc:return jsonify(success=False,error=str(exc)),503
     except Exception:return jsonify(success=False,error="Could not submit membership application"),503
 
 

@@ -382,12 +382,24 @@ class CodeSellerFeatureTests(unittest.TestCase):
         self.assertEqual(next(p for p in plans if p["plan_key"]=="premium")["duration_days"],30)
         config=self.client.put("/api/admin/membership-plans/plus",headers=self.bearer("admin"),json={"name":"Plus","price_paise":50000,"duration_days":30,"benefits":["Priority support"]})
         self.assertEqual(config.status_code,200,config.get_json())
+        basic=self.client.post("/api/memberships/applications",headers=self.bearer(),json={"plan_key":"basic"})
+        self.assertEqual(basic.status_code,201,basic.get_json())
+        basic_result=basic.get_json()["result"]
+        self.assertEqual((basic_result["status"],basic_result["payment_status"],basic_result["amount_paise"]),("approved","not_required",0))
+        self.assertTrue(basic_result["membership_id"].startswith("CSM-"))
+        self.assertEqual(self.client.get("/api/memberships/current",headers=self.bearer()).get_json()["result"]["membership_id"],basic_result["membership_id"])
         def apply_paid():
-            return self.client.post("/api/memberships/applications",headers=self.bearer(),data={"plan_key":"plus","transaction_reference":"UTR-123"},content_type="multipart/form-data")
+            return self.client.post("/api/memberships/applications",headers=self.bearer(),json={"plan_key":"plus"})
         res=apply_paid();self.assertEqual(res.status_code,201,res.get_json())
         first=res.get_json()["result"]["membership_id"]
+        self.assertEqual(res.get_json()["result"]["payment_status"],"pending_verification")
+        self.assertEqual((res.get_json()["result"]["amount_paise"],res.get_json()["result"]["duration_days"]),(50000,30))
+        self.assertEqual(self.database.client.execute("SELECT transaction_reference,screenshot_key,status FROM membership_applications WHERE membership_id=?",(first,)).rows[0],(None,None,"pending"))
         self.assertTrue(first.startswith("CSM-"))
+        self.assertNotEqual(first,basic_result["membership_id"])
         self.assertEqual(self.client.post(f"/api/admin/membership-applications/{first}/approve",headers=self.bearer("admin"),json={}).status_code,200)
+        customer_records=self.client.get("/api/memberships/applications",headers=self.bearer()).get_json()["result"]
+        self.assertEqual(next(row["status"] for row in customer_records if row["membership_id"]==first),"approved")
         approved=self.database.client.execute("SELECT expires_at FROM membership_applications WHERE membership_id=?",(first,)).rows[0][0]
         res=apply_paid();self.assertEqual(res.status_code,201,res.get_json())
         second=res.get_json()["result"]["membership_id"]
@@ -400,6 +412,28 @@ class CodeSellerFeatureTests(unittest.TestCase):
         current=self.client.get("/api/memberships/current",headers=self.bearer()).get_json()["result"]
         self.assertEqual(current["plan_key"],"basic")
         self.assertEqual(self.database.client.execute("SELECT status FROM membership_applications WHERE membership_id=?",(second,)).rows[0][0],"expired")
+
+    def test_paid_membership_requires_configured_price_and_duration(self):
+        self.client.get("/api/memberships/plans")
+        self.database.client.execute("UPDATE membership_plans SET price_paise=0 WHERE plan_key='plus'")
+        price_missing=self.client.post("/api/memberships/applications",headers=self.bearer(),json={"plan_key":"plus"})
+        self.assertEqual(price_missing.status_code,409)
+        self.database.client.execute("UPDATE membership_plans SET price_paise=19900,duration_days=0 WHERE plan_key='plus'")
+        duration_missing=self.client.post("/api/memberships/applications",headers=self.bearer(),json={"plan_key":"plus"})
+        self.assertEqual(duration_missing.status_code,409)
+        self.assertEqual(self.database.client.execute("SELECT COUNT(*) FROM membership_applications WHERE plan_key='plus'").rows[0][0],0)
+
+    def test_admin_can_reject_paid_membership_and_customer_sees_decision(self):
+        self.client.get("/api/memberships/plans")
+        created=self.client.post("/api/memberships/applications",headers=self.bearer(),json={"plan_key":"premium"})
+        membership_id=created.get_json()["result"]["membership_id"]
+        rejected=self.client.post(f"/api/admin/membership-applications/{membership_id}/reject",headers=self.bearer("admin"),json={"reason":"Payment not received"})
+        self.assertEqual(rejected.status_code,200,rejected.get_json())
+        customer=self.client.get("/api/memberships/applications",headers=self.bearer()).get_json()["result"]
+        record=next(row for row in customer if row["membership_id"]==membership_id)
+        self.assertEqual((record["status"],record["rejection_reason"]),("rejected","Payment not received"))
+        events=self.client.get(f"/api/admin/membership-applications/{membership_id}/history",headers=self.bearer("admin")).get_json()["result"]
+        self.assertIn("rejected",[event["action"] for event in events])
 
     def test_campaign_create_activation_and_overlap_validation(self):
         start=self.today.isoformat();end=(self.today+datetime.timedelta(days=2)).isoformat()
